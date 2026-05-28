@@ -198,7 +198,7 @@ flowchart TB
 | `TARGET_CLONE_DIR` | no (default `~/.commit-bot-target`) | Local directory where the target repo is cloned |
 | `TARGET_LOG_FILE` | no (default `notes.md`) | File in the target repo that the bot appends to |
 | `MAX_COMMITS_PER_DAY` | no (default `10`) | Cap on mirrored commits per day |
-| `TZ` | no (default `America/New_York`) | IANA timezone — must match your GitHub profile's timezone |
+| `TZ` | no (default `Africa/Lome`) | IANA timezone — must match your GitHub profile's timezone |
 
 ---
 

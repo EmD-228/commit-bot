@@ -77,7 +77,7 @@ GITHUB_PERSO_NAME="${GITHUB_PERSO_NAME:-}"
 MAX_COMMITS_PER_DAY="${MAX_COMMITS_PER_DAY:-10}"
 TARGET_CLONE_DIR="${TARGET_CLONE_DIR:-$HOME/.commit-bot-target}"
 TARGET_LOG_FILE="${TARGET_LOG_FILE:-notes.md}"
-export TZ="${TZ:-America/New_York}"
+export TZ="${TZ:-Africa/Lome}"
 
 log "Compte pro   : $GITHUB_PRO_USER"
 log "Repo cible   : $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO"
