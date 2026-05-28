@@ -1,6 +1,12 @@
 # Configuration locale Claude Code
 .claude/
 
+# Secrets & état local du mirror bot
+.env
+.mirror_state
+cron.log
+mirror.log
+
 # macOS
 .DS_Store
 
