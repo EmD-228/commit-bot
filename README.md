@@ -1,113 +1,90 @@
-# GitHub Commit Bot
+# Commit Bot
 
-Generate Organic™ GitHub activity
-<br>_My most insidious idea yet_
+Génère une activité GitHub _organique_ — sans tricher tous les jours.
 
 <br>
 
 <p align="center">
-  <img width="90%" src="./the-dream.png" alt="The Contribution Dream">
+  <img width="90%" src="./the-dream.png" alt="Le rêve du graphe de contributions">
 </p>
 
 <br>
 
-Once a day (if my laptop is open),
-<br>commit-bot adds today's line:
+Une fois par jour (si mon laptop est ouvert à 22h),
+<br>commit-bot ajoute la ligne du jour :
 
 ```
-Commit: Wed Sep 25 22:00:00 EDT 2019
+Commit: Wed Sep 25 22:00:00 EDT 2026
 ```
 
-This is a Bash script
-<br>designed to be run locally
-<br>(i.e. on _your_ machine)
+C'est un script Bash
+<br>conçu pour tourner **sur ta machine**
+<br>(pas sur un serveur)
 
 <br><br>
 
-> But [@theshteves](https://github.com/theshteves),
-> <br>I want this to run every day
+> Mais pourquoi pas un serveur qui commit tous les jours ?
 
-_Oh hush_
+Parce que **personne ne commit vraiment tous les jours**.
+<br>Un graphe trop parfait, ça se voit.
 
-Nobody commits every day
-<br>Is that what you want?
-<br>🚫 Sorry, not today
-
-We're looking for a more realistic distribution of activity throughout the year
+L'idée : le cron tourne à 22h **uniquement si ta machine est allumée**.
+<br>Ça produit une distribution naturelle, avec des trous,
+<br>comme la vie de n'importe quel dev.
 
 <br><br>
 
-## Getting Started
+## Mise en route
 
-> If you're on Windows™,
-> <br>[setup the Windows Subsystem for Linux](https://docs.microsoft.com/en-us/windows/wsl/install-win10)
+> Sur Windows, installe d'abord [WSL](https://docs.microsoft.com/en-us/windows/wsl/install-win10).
 
-[Install `git` if `git --version` errors out](https://github.com/git-guides/install-git)
+[Installe `git`](https://github.com/git-guides/install-git) si `git --version` ne fonctionne pas.
 
 <br>
 
-1. Open your command-line
-<br>& navigate to whatever folder you prefer
+1. Ouvre ton terminal et place-toi où tu veux cloner le projet.
 
-2. [Fork this project](https://docs.github.com/en/free-pro-team@latest/github/getting-started-with-github/fork-a-repo) on GitHub
-
-2. Download your new copy of this project
+2. Clone ton fork :
 
 ```shell
-git clone https://github.com/<your-github-username>/commit-bot.git
+git clone https://github.com/EmD-228/commit-bot.git
 ```
 
-**Don't forget to include your username**
-
-3. Test run the script
-<br>in case you need to fix permissions issues
+3. Teste le script (utile pour régler d'éventuels soucis de permissions) :
 
 ```shell
 /bin/bash ./commit-bot/bot.sh
 ```
 
-4. [Open your crontab](https://www.howtogeek.com/101288/how-to-schedule-tasks-on-linux-an-introduction-to-crontab-files/) to set a trigger
+4. Ouvre ton crontab :
 
 ```shell
 crontab -e
 ```
 
-> NOTE:
-> <br>If this makes your screen almost blank
-> <br>with no toolbar of keys to navigate,
-> <br>you've probably entered the text editor Vim
-> <br>
-> <br>Remember, press "i" to start [i]nserting text
-> <br>
-> <br>When you're finished,
-> <br>press "Esc" repeatedly until nothing happens
-> <br>
-> <br>Then type ":wq" to save & quit
-> <br>or ":q!" to quit without saving
+> Si l'écran devient presque vide sans menu visible, tu es dans **Vim**.
+> <br>Appuie sur `i` pour passer en mode insertion.
+> <br>Quand tu as fini, appuie sur `Esc` puis tape `:wq` pour sauvegarder et quitter
+> <br>(ou `:q!` pour quitter sans sauvegarder).
 
-5. Add this line to [schedule every 10pm or whenever](https://crontab.guru/#0_22_*_*_*)
+5. Ajoute cette ligne pour [déclencher tous les jours à 22h](https://crontab.guru/#0_22_*_*_*) :
 
 ```shell
-0 22 * * * /bin/bash /<full-path-to-your-folder>/commit-bot/bot.sh
+0 22 * * * /bin/bash /<chemin-absolu-vers-le-dossier>/commit-bot/bot.sh
 ```
 
-**Do not forget to include the correct folder path**
-
-> NOTE:
-> <br>Make sure you save your changes
-> <br>on your way out!
->
-> To verify your cron installation:
+> Vérifie ton installation avec :
 >
 > ```shell
 > crontab -l
 > ```
 >
-> that should print the same line
-> <br>we just saved to your crontab
->
-> Now, to celebrate, test your script 🎉
->
-> ```shell
-> /bin/bash /<full-path-to-your-folder>/commit-bot/bot.sh
-> ```
+> La ligne ajoutée doit s'afficher.
+
+<br><br>
+
+## Crédits
+
+Maintenu par **Kokou DENYO** ([@EmD-228](https://github.com/EmD-228)).
+
+Basé sur le projet original de **Steven Kneiser** ([@theshteves](https://github.com/theshteves/commit-bot)) — licence MIT.
