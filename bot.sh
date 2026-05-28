@@ -28,7 +28,26 @@
 set -euo pipefail
 
 log() { echo "[bot] $*"; }
-fail() { echo "[bot] ERREUR : $*" >&2; exit 1; }
+
+# --- Notification Discord (silencieuse si DISCORD_WEBHOOK_URL absent) ---
+# Couleurs : success=3066993 (vert) / noop=16776960 (jaune) / error=15158332 (rouge) / info=3447003 (bleu)
+notify_discord() {
+    local title="$1"; local description="$2"; local color="$3"; local fields_json="${4:-[]}"
+    [ -z "${DISCORD_WEBHOOK_URL:-}" ] && return 0
+    local payload
+    payload=$(jq -nc \
+        --arg t "$title" --arg d "$description" \
+        --argjson c "$color" --argjson f "$fields_json" \
+        '{embeds:[{title:$t, description:$d, color:$c, fields:$f, footer:{text:"commit-bot"}, timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))}]}')
+    curl -sS -X POST -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
+}
+
+fail() {
+    local msg="$*"
+    echo "[bot] ERREUR : $msg" >&2
+    notify_discord "Commit Bot — ERROR" "$msg" 15158332
+    exit 1
+}
 
 # --- Pool de messages au format Conventional Commits ---
 COMMIT_MESSAGES=(
@@ -137,6 +156,11 @@ to_create=$((total - already))
 
 if [ "$to_create" -le 0 ]; then
     log "Rien à faire (déjà créés aujourd'hui : $already / total : $total)"
+    noop_fields=$(jq -nc --arg pro "$total" --arg done "$already" --arg repo "$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO" \
+        '[{name:"Contributions pro", value:$pro, inline:true},
+          {name:"Déjà miroirées", value:$done, inline:true},
+          {name:"Repo cible", value:$repo, inline:false}]')
+    notify_discord "Commit Bot — No-op" "Aucun nouveau commit à créer aujourd'hui." 16776960 "$noop_fields"
     exit 0
 fi
 
@@ -184,3 +208,9 @@ git push "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g
 echo "$TODAY $total" > "$state_file"
 
 log "Terminé : $to_create commit(s) poussé(s) sur $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO@$DEFAULT_BRANCH"
+
+success_fields=$(jq -nc --arg pro "$total" --arg created "$to_create" --arg repo "$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO" --arg branch "$DEFAULT_BRANCH" \
+    '[{name:"Contributions pro", value:$pro, inline:true},
+      {name:"Commits créés", value:$created, inline:true},
+      {name:"Repo cible", value:($repo + " (" + $branch + ")"), inline:false}]')
+notify_discord "Commit Bot — Daily Sync" "Synchronisation quotidienne réussie." 3066993 "$success_fields"
