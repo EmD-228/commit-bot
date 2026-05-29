@@ -125,6 +125,20 @@ command -v git  >/dev/null || fail "git est requis"
 # shellcheck disable=SC1091
 set -a; source .env; set +a
 
+# Sanitize : enlève sauts de ligne et espaces extérieurs (défense contre les copier-coller depuis GitHub Variables)
+sanitize() {
+    local v
+    for v in "$@"; do
+        local val
+        val=$(printenv "$v" 2>/dev/null || true)
+        [ -n "$val" ] && export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    done
+}
+sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
+    GITHUB_PERSO_NAME GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN \
+    TARGET_CLONE_DIR TARGET_LOG_FILE TZ DISCORD_WEBHOOK_URL \
+    MAX_COMMITS_PER_DAY
+
 : "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant dans .env}"
 : "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant dans .env}"
 : "${GITHUB_PERSO_USER:?GITHUB_PERSO_USER manquant dans .env}"

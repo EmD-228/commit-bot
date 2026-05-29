@@ -41,6 +41,18 @@ command -v jq   >/dev/null || fail "jq est requis (brew install jq)"
 # shellcheck disable=SC1091
 set -a; source .env; set +a
 
+# Sanitize : enlève sauts de ligne et espaces extérieurs
+sanitize() {
+    local v
+    for v in "$@"; do
+        local val
+        val=$(printenv "$v" 2>/dev/null || true)
+        [ -n "$val" ] && export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    done
+}
+sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER \
+    GITHUB_PERSO_TOKEN TZ DISCORD_WEBHOOK_URL
+
 : "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant}"
 : "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant}"
 : "${GITHUB_PERSO_USER:?GITHUB_PERSO_USER manquant}"
