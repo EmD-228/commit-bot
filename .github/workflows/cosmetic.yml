@@ -1,0 +1,43 @@
+name: cosmetic
+
+# Cosmetic bot : crée des PRs et issues falsifiées sur le repo cible,
+# en miroir des PRs/issues du pro, pour équilibrer le camembert Activity Overview.
+# Schedule : 23:30 UTC (= 23:30 Lomé), après bot.yml.
+
+on:
+  schedule:
+    - cron: '30 23 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    name: Daily PRs + issues mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout commit-bot
+        uses: actions/checkout@v4
+
+      - name: Restore .cosmetic_state cache
+        uses: actions/cache@v4
+        with:
+          path: .cosmetic_state
+          key: cosmetic-state-${{ github.run_id }}
+          restore-keys: cosmetic-state-
+
+      - name: Run cosmetic.sh
+        env:
+          GITHUB_PRO_USER:    ${{ vars.GH_PRO_USER }}
+          GITHUB_PRO_TOKEN:   ${{ secrets.GH_PRO_TOKEN }}
+          GITHUB_PERSO_USER:  ${{ vars.GH_PERSO_USER }}
+          GITHUB_PERSO_EMAIL: ${{ vars.GH_PERSO_EMAIL }}
+          GITHUB_PERSO_NAME:  ${{ vars.GH_PERSO_NAME }}
+          GITHUB_PERSO_REPO:  ${{ vars.GH_PERSO_REPO }}
+          GITHUB_PERSO_TOKEN: ${{ secrets.GH_PERSO_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TZ:                 ${{ vars.TZ || 'Africa/Lome' }}
+          MAX_PRS_PER_DAY:    ${{ vars.MAX_PRS_PER_DAY || '5' }}
+          ISSUE_WEEKDAY:      ${{ vars.ISSUE_WEEKDAY || '1' }}
+        run: |
+          touch .env
+          bash cosmetic.sh

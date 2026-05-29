@@ -1,0 +1,43 @@
+name: bot
+
+# Daily mirror du compte pro vers le repo cible.
+# Schedule : 22:00 UTC = 22:00 Lomé (Africa/Lome est UTC+0).
+
+on:
+  schedule:
+    - cron: '0 22 * * *'
+  workflow_dispatch:  # déclenchement manuel depuis l'onglet Actions
+
+jobs:
+  run:
+    name: Daily mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout commit-bot
+        uses: actions/checkout@v4
+
+      - name: Restore .bot_state cache
+        uses: actions/cache@v4
+        with:
+          path: .bot_state
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
+      - name: Run bot.sh
+        env:
+          GITHUB_PRO_USER:    ${{ vars.GH_PRO_USER }}
+          GITHUB_PRO_TOKEN:   ${{ secrets.GH_PRO_TOKEN }}
+          GITHUB_PERSO_USER:  ${{ vars.GH_PERSO_USER }}
+          GITHUB_PERSO_EMAIL: ${{ vars.GH_PERSO_EMAIL }}
+          GITHUB_PERSO_NAME:  ${{ vars.GH_PERSO_NAME }}
+          GITHUB_PERSO_REPO:  ${{ vars.GH_PERSO_REPO }}
+          GITHUB_PERSO_TOKEN: ${{ secrets.GH_PERSO_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TZ:                 ${{ vars.TZ || 'Africa/Lome' }}
+          MAX_COMMITS_PER_DAY: ${{ vars.MAX_COMMITS_PER_DAY || '10' }}
+        run: |
+          # Le script attend un .env ; on en crée un vide, les vraies valeurs
+          # arrivent via le bloc env: ci-dessus
+          touch .env
+          bash bot.sh

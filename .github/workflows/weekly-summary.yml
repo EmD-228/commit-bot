@@ -1,0 +1,29 @@
+name: weekly-summary
+
+# Résumé hebdo Discord : tous les dimanches à 22:00 UTC (= 22:00 Lomé).
+
+on:
+  schedule:
+    - cron: '0 22 * * 0'
+  workflow_dispatch:
+
+jobs:
+  run:
+    name: Weekly Discord summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout commit-bot
+        uses: actions/checkout@v4
+
+      - name: Run weekly-summary.sh
+        env:
+          GITHUB_PRO_USER:    ${{ vars.GH_PRO_USER }}
+          GITHUB_PRO_TOKEN:   ${{ secrets.GH_PRO_TOKEN }}
+          GITHUB_PERSO_USER:  ${{ vars.GH_PERSO_USER }}
+          GITHUB_PERSO_TOKEN: ${{ secrets.GH_PERSO_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TZ:                 ${{ vars.TZ || 'Africa/Lome' }}
+        run: |
+          touch .env
+          bash weekly-summary.sh
