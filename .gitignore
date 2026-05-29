@@ -4,6 +4,7 @@
 # Secrets & état local du bot
 .env
 .bot_state
+.cosmetic_state
 bot.log
 cron.log
 

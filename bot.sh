@@ -68,6 +68,45 @@ pick_message() {
     echo "${COMMIT_MESSAGES[$((RANDOM % n))]}"
 }
 
+# --- Pool de titres d'issues (style task tracker) ---
+ISSUE_TITLES=(
+    "Improve documentation clarity"
+    "Add changelog entry"
+    "Polish README formatting"
+    "Refactor for clarity"
+    "Add inline comments"
+    "Tidy up dead code"
+    "Better error messages"
+    "Add usage example"
+    "Update notes"
+    "Cleanup unused imports"
+)
+
+pick_issue_title() {
+    local n=${#ISSUE_TITLES[@]}
+    echo "${ISSUE_TITLES[$((RANDOM % n))]}"
+}
+
+# --- Distribution des contributions par type ---
+# Args: total_contribs
+# Stdout: "commits prs issues" (où prs * 2 = contribs apportées par les PRs : 1 PR open + 1 squash commit)
+distribute_contributions() {
+    local n=$1
+    if [ "$n" -le 3 ]; then
+        echo "$n 0 0"
+    elif [ "$n" -le 6 ]; then
+        # 1 PR (= 2 contribs) + reste en commits
+        echo "$((n - 2)) 1 0"
+    else
+        # ~10% issues, ~20% PRs (=40% des contribs), reste en commits
+        local issues=$((n / 10))
+        [ "$issues" -lt 1 ] && issues=1
+        local prs=$((n / 5))
+        local commits=$((n - 2 * prs - issues))
+        echo "$commits $prs $issues"
+    fi
+}
+
 # --- Placement (dossier du projet commit-bot) ---
 case "$OSTYPE" in
     darwin*) cd "$(dirname "$0")" || fail "cd impossible" ;;
