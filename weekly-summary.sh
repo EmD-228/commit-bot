@@ -60,10 +60,21 @@ sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER \
 GITHUB_PERSO_REPO="${GITHUB_PERSO_REPO:-?}"
 export TZ="${TZ:-Africa/Lome}"
 
+# --- Helper cross-platform pour date math ---
+date_days_ago() {
+    local n="$1"
+    local fmt="$2"
+    if date --version >/dev/null 2>&1; then
+        date -d "${n} days ago" +"$fmt"   # GNU (Linux / GH Actions)
+    else
+        date -v-${n}d +"$fmt"             # BSD (macOS)
+    fi
+}
+
 # --- Fenêtre temporelle : 7 derniers jours ---
-FROM=$(date -v-6d +"%Y-%m-%dT00:00:00%z")  # début = il y a 6 jours (= 7 jours en comptant aujourd'hui)
+FROM=$(date_days_ago 6 "%Y-%m-%dT00:00:00%z")
 TO=$(date +"%Y-%m-%dT23:59:59%z")
-FROM_DATE=$(date -v-6d +"%Y-%m-%d")
+FROM_DATE=$(date_days_ago 6 "%Y-%m-%d")
 TO_DATE=$(date +"%Y-%m-%d")
 
 log "Fenêtre : $FROM_DATE → $TO_DATE"
