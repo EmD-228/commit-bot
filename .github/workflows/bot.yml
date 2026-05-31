@@ -36,6 +36,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TZ:                 ${{ vars.TZ || 'Africa/Lome' }}
           MAX_COMMITS_PER_DAY: ${{ vars.MAX_COMMITS_PER_DAY || '10' }}
+          MIN_COMMITS_PER_DAY: ${{ vars.MIN_COMMITS_PER_DAY || '1' }}
         run: |
           # Le script attend un .env ; on en crée un vide, les vraies valeurs
           # arrivent via le bloc env: ci-dessus

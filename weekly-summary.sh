@@ -43,12 +43,14 @@ set -a; source .env; set +a
 
 # Sanitize : enlève sauts de ligne et espaces extérieurs
 sanitize() {
-    local v
+    local v val
     for v in "$@"; do
-        local val
         val=$(printenv "$v" 2>/dev/null || true)
-        [ -n "$val" ] && export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -n "$val" ]; then
+            export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        fi
     done
+    return 0
 }
 sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER \
     GITHUB_PERSO_TOKEN TZ DISCORD_WEBHOOK_URL

@@ -127,17 +127,19 @@ set -a; source .env; set +a
 
 # Sanitize : enlève sauts de ligne et espaces extérieurs (défense contre les copier-coller depuis GitHub Variables)
 sanitize() {
-    local v
+    local v val
     for v in "$@"; do
-        local val
         val=$(printenv "$v" 2>/dev/null || true)
-        [ -n "$val" ] && export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -n "$val" ]; then
+            export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        fi
     done
+    return 0
 }
 sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
     GITHUB_PERSO_NAME GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN \
     TARGET_CLONE_DIR TARGET_LOG_FILE TZ DISCORD_WEBHOOK_URL \
-    MAX_COMMITS_PER_DAY
+    MAX_COMMITS_PER_DAY MIN_COMMITS_PER_DAY
 
 : "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant dans .env}"
 : "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant dans .env}"
@@ -147,6 +149,7 @@ sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
 : "${GITHUB_PERSO_TOKEN:?GITHUB_PERSO_TOKEN manquant dans .env (requis pour push automatique)}"
 GITHUB_PERSO_NAME="${GITHUB_PERSO_NAME:-}"
 MAX_COMMITS_PER_DAY="${MAX_COMMITS_PER_DAY:-10}"
+MIN_COMMITS_PER_DAY="${MIN_COMMITS_PER_DAY:-1}"
 TARGET_CLONE_DIR="${TARGET_CLONE_DIR:-$HOME/.commit-bot-target}"
 TARGET_LOG_FILE="${TARGET_LOG_FILE:-notes.md}"
 export TZ="${TZ:-Africa/Lome}"
@@ -189,6 +192,11 @@ log "Contributions pro aujourd'hui : $total"
 if [ "$total" -gt "$MAX_COMMITS_PER_DAY" ]; then
     log "Cap appliqué : $total → $MAX_COMMITS_PER_DAY"
     total=$MAX_COMMITS_PER_DAY
+fi
+
+if [ "$total" -lt "$MIN_COMMITS_PER_DAY" ]; then
+    log "Baseline appliqué : $total → $MIN_COMMITS_PER_DAY (au moins 1 commit par jour)"
+    total=$MIN_COMMITS_PER_DAY
 fi
 
 # --- État (dans PROJECT_DIR pour que le clone reste lisible) ---
