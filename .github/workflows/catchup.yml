@@ -1,0 +1,36 @@
+name: catchup
+
+# Tourne le matin (07:00 UTC = 07:00 Lomé) pour rattraper les contributions
+# du pro qui auraient été manquées par bot.sh (cas typique : PRs mergées
+# pendant la nuit).
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    name: Daily catchup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout commit-bot
+        uses: actions/checkout@v4
+
+      - name: Run catchup.sh
+        env:
+          GITHUB_PRO_USER:    ${{ vars.GH_PRO_USER }}
+          GITHUB_PRO_TOKEN:   ${{ secrets.GH_PRO_TOKEN }}
+          GITHUB_PERSO_USER:  ${{ vars.GH_PERSO_USER }}
+          GITHUB_PERSO_EMAIL: ${{ vars.GH_PERSO_EMAIL }}
+          GITHUB_PERSO_NAME:  ${{ vars.GH_PERSO_NAME }}
+          GITHUB_PERSO_REPO:  ${{ vars.GH_PERSO_REPO }}
+          GITHUB_PERSO_TOKEN: ${{ secrets.GH_PERSO_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TZ:                 ${{ vars.TZ || 'Africa/Lome' }}
+          MAX_COMMITS_PER_DAY: ${{ vars.MAX_COMMITS_PER_DAY || '10' }}
+          LOOKBACK_DAYS:      ${{ vars.LOOKBACK_DAYS || '7' }}
+        run: |
+          touch .env
+          bash catchup.sh
