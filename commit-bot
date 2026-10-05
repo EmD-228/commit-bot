@@ -88,11 +88,65 @@ lower() {
     echo "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-echo
-echo "commit-bot — copie des contributions d'un compte GitHub vers un autre"
-echo "Seuls les compteurs par jour sont lus : aucun code, message ni nom de repo."
-echo "Ctrl+C pour quitter à tout moment. Rien n'est poussé avant ta confirmation."
-echo
+# --- Bannière ---
+# Couleurs seulement dans un vrai terminal 256 couleurs, et si NO_COLOR n'est pas défini
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 256 ]; then
+    COLOR=true
+else
+    COLOR=false
+fi
+
+# Args : couleur (palette 256), texte
+paint() {
+    if $COLOR; then
+        printf '\033[38;5;%sm%s\033[0m' "$1" "$2"
+    else
+        printf '%s' "$2"
+    fi
+}
+
+# Nom en grandes lettres, dégradé des verts du graphe de contributions GitHub,
+# puis une bande de carrés façon graphe
+show_banner() {
+    local cols i
+    local greens=(22 28 34 40 46 82) levels=(237 22 28 34 46)
+    local art=(
+        " ██████╗ ██████╗ ███╗   ███╗███╗   ███╗██╗████████╗      ██████╗  ██████╗ ████████╗"
+        "██╔════╝██╔═══██╗████╗ ████║████╗ ████║██║╚══██╔══╝      ██╔══██╗██╔═══██╗╚══██╔══╝"
+        "██║     ██║   ██║██╔████╔██║██╔████╔██║██║   ██║   █████╗██████╔╝██║   ██║   ██║   "
+        "██║     ██║   ██║██║╚██╔╝██║██║╚██╔╝██║██║   ██║   ╚════╝██╔══██╗██║   ██║   ██║   "
+        "╚██████╗╚██████╔╝██║ ╚═╝ ██║██║ ╚═╝ ██║██║   ██║         ██████╔╝╚██████╔╝   ██║   "
+        " ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝     ╚═╝╚═╝   ╚═╝         ╚═════╝  ╚═════╝    ╚═╝   "
+    )
+    # Largeur lue sur stderr : dans $(...), stdout est un tube et tput répondrait toujours 80
+    cols=$(stty size <&2 2>/dev/null | awk '{ print $2 }' || true)
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+
+    echo
+    if [ "$cols" -ge 88 ]; then
+        for i in 0 1 2 3 4 5; do
+            printf '  '; paint "${greens[$i]}" "${art[$i]}"; printf '\n'
+        done
+    else
+        printf '  '; paint 46 "c o m m i t - b o t"; printf '\n'
+    fi
+
+    if $COLOR; then
+        local squares=$(( (cols < 88 ? cols - 4 : 84) / 2 ))
+        printf '\n  '
+        for ((i = 0; i < squares; i++)); do
+            paint "${levels[$((RANDOM % 5))]}" "■ "
+        done
+        printf '\n'
+    fi
+    echo
+    printf '  '; paint 250 "Copie les contributions d'un compte GitHub vers un autre."; printf '\n'
+    printf '  '; paint 244 "Seuls les compteurs par jour sont lus : aucun code, message ni nom de repo."; printf '\n'
+    printf '  '; paint 244 "Ctrl+C pour quitter à tout moment. Rien n'est poussé avant ta confirmation."; printf '\n'
+    echo
+}
+
+show_banner
 
 # --- 1. Compte source (pro) ---
 echo "1. Compte source (celui dont on copie les contributions)"
