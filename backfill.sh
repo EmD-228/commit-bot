@@ -13,30 +13,18 @@
 # Usage :
 #   ./backfill.sh --from YYYY-MM-DD --to YYYY-MM-DD [--dry-run] [--no-cap]
 #
+# Limites :
+#   - Période d'un an maximum par run (limite de l'API GitHub).
+#   - GitHub ne compte que les ~1000 derniers commits d'un même push : au-delà,
+#     découper en plusieurs runs (un push par run).
+#
 
 set -euo pipefail
 
-log() { echo "[backfill] $*"; }
-fail() { echo "[backfill] ERREUR : $*" >&2; exit 1; }
-
-# --- Pool de messages identique à bot.sh ---
-COMMIT_MESSAGES=(
-    "chore: daily activity log"
-    "chore: routine maintenance"
-    "chore: update activity log"
-    "chore: housekeeping"
-    "chore: daily sync"
-    "chore: routine update"
-    "chore: log entry"
-    "docs: update notes"
-    "docs: log update"
-    "refactor: minor cleanup"
-)
-
-pick_message() {
-    local n=${#COMMIT_MESSAGES[@]}
-    echo "${COMMIT_MESSAGES[$((RANDOM % n))]}"
-}
+BOT_TAG="backfill"
+BOT_LABEL="Backfill Bot"
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
 # --- Args ---
 FROM=""
@@ -56,51 +44,10 @@ done
 [ -n "$FROM" ] || fail "--from YYYY-MM-DD requis"
 [ -n "$TO" ]   || fail "--to YYYY-MM-DD requis"
 
-# --- Placement & dépendances ---
-case "$OSTYPE" in
-    darwin*) cd "$(dirname "$0")" || fail "cd impossible" ;;
-    linux*)  cd "$(dirname "$(readlink -f "$0")")" || fail "cd impossible" ;;
-    *)       fail "OS non supporté : $OSTYPE" ;;
-esac
-PROJECT_DIR="$(pwd)"
-
-command -v curl >/dev/null || fail "curl est requis"
-command -v jq   >/dev/null || fail "jq est requis (brew install jq)"
-command -v git  >/dev/null || fail "git est requis"
-
-[ -f .env ] || fail ".env introuvable"
-# shellcheck disable=SC1091
-set -a; source .env; set +a
-
-# Sanitize : enlève sauts de ligne et espaces extérieurs
-sanitize() {
-    local v val
-    for v in "$@"; do
-        val=$(printenv "$v" 2>/dev/null || true)
-        if [ -n "$val" ]; then
-            export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-        fi
-    done
-    return 0
-}
-sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
-    GITHUB_PERSO_NAME GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN \
-    TARGET_CLONE_DIR TARGET_LOG_FILE TZ DISCORD_WEBHOOK_URL \
-    MAX_COMMITS_PER_DAY
-
-: "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant}"
-: "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant}"
-: "${GITHUB_PERSO_USER:?GITHUB_PERSO_USER manquant}"
-: "${GITHUB_PERSO_EMAIL:?GITHUB_PERSO_EMAIL manquant}"
-: "${GITHUB_PERSO_REPO:?GITHUB_PERSO_REPO manquant}"
-: "${GITHUB_PERSO_TOKEN:?GITHUB_PERSO_TOKEN manquant}"
-GITHUB_PERSO_NAME="${GITHUB_PERSO_NAME:-}"
-MAX_COMMITS_PER_DAY="${MAX_COMMITS_PER_DAY:-10}"
-TARGET_CLONE_DIR="${TARGET_CLONE_DIR:-$HOME/.commit-bot-target}"
-TARGET_LOG_FILE="${TARGET_LOG_FILE:-notes.md}"
-export TZ="${TZ:-Africa/Lome}"
-
-TZ_OFFSET=$(date +"%z")
+require_commands curl jq git
+load_env
+require_vars GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
+    GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN
 
 log "Compte pro   : $GITHUB_PRO_USER"
 log "Repo cible   : $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO"
@@ -110,31 +57,10 @@ log "Période      : $FROM → $TO (TZ=$TZ, offset=$TZ_OFFSET)"
 $DRY_RUN && log "Mode DRY-RUN : aucun commit ni push"
 $NO_CAP  && log "Mode NO-CAP : cap MAX_COMMITS_PER_DAY ignoré"
 
-# --- Requête GraphQL : calendar pour la période ---
-FROM_ISO="${FROM}T00:00:00${TZ_OFFSET}"
-TO_ISO="${TO}T23:59:59${TZ_OFFSET}"
-
-payload=$(jq -nc \
-    --arg u "$GITHUB_PRO_USER" \
-    --arg f "$FROM_ISO" \
-    --arg t "$TO_ISO" \
-    '{
-      query: "query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){contributionCalendar{totalContributions weeks{contributionDays{date contributionCount}}}}}}",
-      variables: {u:$u, f:$f, t:$t}
-    }')
-
-response=$(curl -sS \
-    -H "Authorization: bearer $GITHUB_PRO_TOKEN" \
-    -H "Content-Type: application/json" \
-    -X POST \
-    -d "$payload" \
-    https://api.github.com/graphql)
-
-if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
-    fail "API GitHub : $(echo "$response" | jq -c '.errors')"
-fi
-echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
-    || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
+# --- Contributions pro de la période ---
+response=$(query_contributions "$GITHUB_PRO_USER" "$GITHUB_PRO_TOKEN" \
+    "${FROM}T00:00:00${TZ_OFFSET}" "${TO}T23:59:59${TZ_OFFSET}" \
+    "contributionCalendar{totalContributions weeks{contributionDays{date contributionCount}}}")
 
 days=$(echo "$response" | jq -r '
     .data.user.contributionsCollection.contributionCalendar.weeks[].contributionDays[]
@@ -159,6 +85,7 @@ fi
 log "Jours actifs        : $day_count"
 log "Contributions pro   : $raw_total (avant cap)"
 log "Commits à créer     : $capped_total"
+[ "$capped_total" -gt 1000 ] && log "ATTENTION : plus de 1000 commits en un push, GitHub risque de ne pas compter les plus anciens — découpe la période"
 
 if $DRY_RUN; then
     log "DRY-RUN — aperçu des 20 premiers jours :"
@@ -166,70 +93,20 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# --- Préparation du clone cible ---
-push_url="https://${GITHUB_PERSO_USER}:${GITHUB_PERSO_TOKEN}@github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
-
-if [ ! -d "$TARGET_CLONE_DIR/.git" ]; then
-    log "Premier run : clonage de $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO..."
-    git clone --quiet "$push_url" "$TARGET_CLONE_DIR" 2>&1 \
-        | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-        || fail "clonage de la cible a échoué"
-fi
-
-cd "$TARGET_CLONE_DIR" || fail "cd vers le clone cible impossible"
-
-# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
-git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
-
-DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
-[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
-log "Branche cible : $DEFAULT_BRANCH"
-
-# Aligne le clone sur le remote : jette tout commit local orphelin d'un push raté
-git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-    || fail "fetch a échoué"
-git reset --quiet --hard
-git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
-
-git config user.email "$GITHUB_PERSO_EMAIL"
-[ -n "$GITHUB_PERSO_NAME" ] && git config user.name "$GITHUB_PERSO_NAME"
-
 # --- Génération des commits ---
-created=0
+prepare_target_clone
 
 while read -r day count; do
     [ -z "$day" ] && continue
     if ! $NO_CAP && [ "$count" -gt "$MAX_COMMITS_PER_DAY" ]; then
         count=$MAX_COMMITS_PER_DAY
     fi
-
-    # Spread N commits entre 09:00 et 21:00 (12h)
-    for i in $(seq 1 "$count"); do
-        if [ "$count" -eq 1 ]; then
-            offset_min=360
-        else
-            offset_min=$(( (i - 1) * 720 / (count - 1) ))
-        fi
-        total_min=$(( 9 * 60 + offset_min ))
-        hh=$(printf '%02d' $(( total_min / 60 )))
-        mm=$(printf '%02d' $(( total_min % 60 )))
-        ss=$(printf '%02d' $(( (i * 7) % 60 )))
-        ts_iso="${day}T${hh}:${mm}:${ss}${TZ_OFFSET}"
-
-        msg=$(pick_message)
-        echo "$msg @ $ts_iso" >> "$TARGET_LOG_FILE"
-        git add "$TARGET_LOG_FILE"
-        GIT_AUTHOR_DATE="$ts_iso" GIT_COMMITTER_DATE="$ts_iso" \
-            git commit --quiet -m "$msg" || fail "commit a échoué : $ts_iso"
-        created=$((created + 1))
-    done
+    commit_spread_over_day "$day" "$count"
 done <<< "$days"
 
-log "$created commit(s) créé(s) localement"
+log "$capped_total commit(s) créé(s) localement"
 
-# --- Push ---
 log "Push en cours..."
-git push "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-    || fail "push a échoué"
+push_target
 
-log "Terminé : $created commit(s) backfillé(s) sur $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO ($FROM → $TO)"
+log "Terminé : $capped_total commit(s) backfillé(s) sur $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO ($FROM → $TO)"

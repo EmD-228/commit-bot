@@ -18,44 +18,13 @@
 
 set -euo pipefail
 
-log() { echo "[cosmetic] $*"; }
-
-# --- Notification Discord ---
-notify_discord() {
-    local title="$1"; local description="$2"; local color="$3"; local fields_json="${4:-[]}"
-    [ -z "${DISCORD_WEBHOOK_URL:-}" ] && return 0
-    local payload
-    payload=$(jq -nc \
-        --arg t "$title" --arg d "$description" \
-        --argjson c "$color" --argjson f "$fields_json" \
-        '{embeds:[{title:$t, description:$d, color:$c, fields:$f, footer:{text:"commit-bot — cosmetic"}, timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))}]}')
-    curl -sS -X POST -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
-}
-
-fail() {
-    local msg="$*"
-    echo "[cosmetic] ERREUR : $msg" >&2
-    notify_discord "Cosmetic Bot — ERROR" "$msg" 15158332
-    exit 1
-}
-
-# --- Pool de titres de PRs (style change request) ---
-# DOIT rester identique à COSMETIC_PR_TITLES de catchup.sh, qui s'en sert pour
-# reconnaître les commits squash de ces PRs.
-PR_TITLES=(
-    "refactor: simplify activity logging"
-    "chore: tidy notes formatting"
-    "docs: clarify usage example"
-    "fix: typo in log entry"
-    "chore: remove stale entries"
-    "refactor: reorganize sections"
-    "docs: update changelog"
-    "chore: bump activity log"
-    "fix: minor formatting"
-    "refactor: collapse redundant lines"
-)
+BOT_TAG="cosmetic"
+BOT_LABEL="Cosmetic Bot"
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
 # --- Pool de titres d'issues (style task tracker) ---
+# (les titres de PRs, PR_TITLES, sont dans lib/common.sh : catchup.sh s'en sert aussi)
 ISSUE_TITLES=(
     "Improve documentation clarity"
     "Add changelog entry"
@@ -69,72 +38,14 @@ ISSUE_TITLES=(
     "Cleanup unused imports"
 )
 
-# Indirection compatible bash 3.2 (macOS) — `local -n` exige bash 4.3+
-pick_from() {
-    local ref="$1[@]"
-    local arr=("${!ref}")
-    local n=${#arr[@]}
-    echo "${arr[$((RANDOM % n))]}"
-}
-
-# --- Placement ---
-case "$OSTYPE" in
-    darwin*) cd "$(dirname "$0")" || fail "cd impossible" ;;
-    linux*)  cd "$(dirname "$(readlink -f "$0")")" || fail "cd impossible" ;;
-    *)       fail "OS non supporté : $OSTYPE" ;;
-esac
-PROJECT_DIR="$(pwd)"
-
-command -v curl >/dev/null || fail "curl est requis"
-command -v jq   >/dev/null || fail "jq est requis"
-command -v git  >/dev/null || fail "git est requis"
-
-[ -f .env ] || fail ".env introuvable"
-# shellcheck disable=SC1091
-set -a; source .env; set +a
-
-# Sanitize : enlève sauts de ligne et espaces extérieurs
-sanitize() {
-    local v val
-    for v in "$@"; do
-        val=$(printenv "$v" 2>/dev/null || true)
-        if [ -n "$val" ]; then
-            export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-        fi
-    done
-    return 0
-}
-sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
-    GITHUB_PERSO_NAME GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN \
-    TARGET_CLONE_DIR TARGET_LOG_FILE TZ DISCORD_WEBHOOK_URL \
-    MAX_PRS_PER_DAY ISSUE_WEEKDAY
-
-: "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant}"
-: "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant}"
-: "${GITHUB_PERSO_USER:?GITHUB_PERSO_USER manquant}"
-: "${GITHUB_PERSO_EMAIL:?GITHUB_PERSO_EMAIL manquant}"
-: "${GITHUB_PERSO_REPO:?GITHUB_PERSO_REPO manquant}"
-: "${GITHUB_PERSO_TOKEN:?GITHUB_PERSO_TOKEN manquant}"
-GITHUB_PERSO_NAME="${GITHUB_PERSO_NAME:-}"
-TARGET_CLONE_DIR="${TARGET_CLONE_DIR:-$HOME/.commit-bot-target}"
-TARGET_LOG_FILE="${TARGET_LOG_FILE:-notes.md}"
-MAX_PRS_PER_DAY="${MAX_PRS_PER_DAY:-5}"
+require_commands curl jq git
+load_env
+require_vars GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
+    GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN
 ISSUE_WEEKDAY="${ISSUE_WEEKDAY:-1}"  # 1 = lundi (jour où on crée 1 issue)
-export TZ="${TZ:-Africa/Lome}"
 
-# Cron GitHub en retard → run après minuit : on lit les PRs de la VEILLE
-# (une PR ne peut pas être antidatée, elle apparaîtra sur le jour courant,
-# mais le compte n'est plus perdu)
-LATE_RUN_CUTOFF_HOUR="${LATE_RUN_CUTOFF_HOUR:-6}"
-target_date() {
-    if [ "$(date +%H)" -ge "$LATE_RUN_CUTOFF_HOUR" ]; then
-        date +"$1"
-    elif date --version >/dev/null 2>&1; then
-        date -d "1 day ago" +"$1"
-    else
-        date -v-1d +"$1"
-    fi
-}
+# Run tardif (après minuit) : on lit les PRs de la VEILLE (une PR ne peut pas
+# être antidatée, elle apparaîtra sur le jour courant, mais le compte n'est plus perdu)
 TODAY=$(target_date "%Y-%m-%d")
 WEEKDAY=$(target_date "%u")  # 1=lundi … 7=dimanche
 
@@ -142,24 +53,10 @@ log "Compte pro : $GITHUB_PRO_USER"
 log "Repo cible : $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO"
 log "Jour       : $TODAY (weekday=$WEEKDAY)"
 
-# --- Requête API : combien de PRs/issues sur le pro aujourd'hui ? ---
-FROM=$(target_date "%Y-%m-%dT00:00:00%z")
-TO=$(target_date "%Y-%m-%dT23:59:59%z")
-
-payload=$(jq -nc --arg u "$GITHUB_PRO_USER" --arg f "$FROM" --arg t "$TO" \
-    '{query:"query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){totalPullRequestContributions totalIssueContributions}}}", variables:{u:$u,f:$f,t:$t}}')
-response=$(curl -sS \
-    -H "Authorization: bearer $GITHUB_PRO_TOKEN" \
-    -H "Content-Type: application/json" \
-    -X POST -d "$payload" \
-    https://api.github.com/graphql)
-
-if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
-    fail "API GitHub : $(echo "$response" | jq -c '.errors')"
-fi
-echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
-    || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
-
+# --- Combien de PRs/issues sur le pro aujourd'hui ? ---
+response=$(query_contributions "$GITHUB_PRO_USER" "$GITHUB_PRO_TOKEN" \
+    "${TODAY}T00:00:00${TZ_OFFSET}" "${TODAY}T23:59:59${TZ_OFFSET}" \
+    "totalPullRequestContributions totalIssueContributions")
 pro_prs=$(echo "$response" | jq -r '.data.user.contributionsCollection.totalPullRequestContributions // 0')
 pro_issues=$(echo "$response" | jq -r '.data.user.contributionsCollection.totalIssueContributions // 0')
 log "Pro aujourd'hui : $pro_prs PR(s), $pro_issues issue(s)"
@@ -202,42 +99,14 @@ log "À créer : $prs_to_create PR(s) + $issues_to_create issue(s)"
 
 if [ "$prs_to_create" -eq 0 ] && [ "$issues_to_create" -eq 0 ]; then
     log "Rien à faire."
-    notify_discord "Cosmetic Bot — No-op" "Aucune PR ni issue à falsifier aujourd'hui." 16776960 \
+    notify_discord "Cosmetic Bot — No-op" "Aucune PR ni issue à falsifier aujourd'hui." "$COLOR_NOOP" \
         "$(jq -nc --arg pro "$pro_prs" --arg today "$TODAY" \
             '[{name:"PRs pro aujourd'\''hui", value:$pro, inline:true},
               {name:"Jour", value:$today, inline:true}]')"
     exit 0
 fi
 
-# --- Préparation clone cible ---
-push_url="https://${GITHUB_PERSO_USER}:${GITHUB_PERSO_TOKEN}@github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
-
-if [ ! -d "$TARGET_CLONE_DIR/.git" ]; then
-    log "Clonage initial..."
-    git clone --quiet "$push_url" "$TARGET_CLONE_DIR" 2>&1 \
-        | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-        || fail "clonage a échoué"
-fi
-
-cd "$TARGET_CLONE_DIR" || fail "cd vers le clone impossible"
-
-# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
-git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
-
-DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
-[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
-
-# Aligne le clone sur le remote : jette tout commit local orphelin d'un run raté
-sync_default_branch() {
-    git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-        || fail "fetch a échoué"
-    git reset --quiet --hard
-    git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
-}
-sync_default_branch
-
-git config user.email "$GITHUB_PERSO_EMAIL"
-[ -n "$GITHUB_PERSO_NAME" ] && git config user.name "$GITHUB_PERSO_NAME"
+prepare_target_clone
 
 API_BASE="https://api.github.com/repos/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}"
 
@@ -245,16 +114,12 @@ API_BASE="https://api.github.com/repos/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}
 create_pr_cycle() {
     local idx="$1"
     local branch="cosmetic/$(date +%s)-${idx}-$RANDOM"
-    local title ts resp number
+    local title resp number
     title=$(pick_from PR_TITLES)
-    ts=$(date +"%a %b %e %H:%M:%S %Z %Y")
 
     git checkout --quiet -b "$branch" "$DEFAULT_BRANCH"
-    echo "$title @ $ts" >> "$TARGET_LOG_FILE"
-    git add "$TARGET_LOG_FILE"
-    git commit --quiet -m "$title"
-    git push --quiet "$push_url" "$branch" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-        || fail "push de la branche $branch a échoué"
+    log_commit "$title"
+    push_target "$branch"
 
     resp=$(curl -sS -X POST \
         -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
@@ -287,7 +152,7 @@ create_pr_cycle() {
     curl -sS -X DELETE \
         -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
         "$API_BASE/git/refs/heads/$branch" >/dev/null 2>&1 || true
-    sync_default_branch
+    sync_target_branch
     git branch --quiet -D "$branch" 2>/dev/null || true
 
     log "  PR #$number : $title"
@@ -342,6 +207,6 @@ success_fields=$(jq -nc \
       {name:"Issues créées (perso)", value:$issues, inline:true},
       {name:"Référence pro (PRs/issues)", value:($pro_prs + " / " + $pro_issues), inline:false},
       {name:"Repo cible", value:$repo, inline:false}]')
-notify_discord "Cosmetic Bot — Daily" "Activity Overview mis à jour." 3066993 "$success_fields"
+notify_discord "Cosmetic Bot — Daily" "Activity Overview mis à jour." "$COLOR_SUCCESS" "$success_fields"
 
 log "Terminé."

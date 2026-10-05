@@ -16,10 +16,11 @@
 #
 # Comportement :
 #   1. Lit le nombre de contributions du jour sur le compte GitHub PRO via GraphQL.
-#   2. Génère le même nombre de commits dans le repo cible.
+#   2. Génère autant de commits dans le repo cible, moins les contributions
+#      que cosmetic.sh produira pour les PRs (2 par PR).
 #   3. Push avec l'identité PERSO.
 #
-# NE LIT JAMAIS le contenu de tes commits pro — uniquement le compteur total.
+# NE LIT JAMAIS le contenu de tes commits pro — uniquement les compteurs.
 #
 # Cron :
 #   0 23 * * * /bin/bash /<chemin-absolu>/commit-bot/bot.sh >> bot.log 2>&1
@@ -27,145 +28,39 @@
 
 set -euo pipefail
 
-log() { echo "[bot] $*"; }
+BOT_TAG="bot"
+BOT_LABEL="Commit Bot"
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
-# --- Notification Discord (silencieuse si DISCORD_WEBHOOK_URL absent) ---
-# Couleurs : success=3066993 (vert) / noop=16776960 (jaune) / error=15158332 (rouge) / info=3447003 (bleu)
-notify_discord() {
-    local title="$1"; local description="$2"; local color="$3"; local fields_json="${4:-[]}"
-    [ -z "${DISCORD_WEBHOOK_URL:-}" ] && return 0
-    local payload
-    payload=$(jq -nc \
-        --arg t "$title" --arg d "$description" \
-        --argjson c "$color" --argjson f "$fields_json" \
-        '{embeds:[{title:$t, description:$d, color:$c, fields:$f, footer:{text:"commit-bot"}, timestamp:(now | strftime("%Y-%m-%dT%H:%M:%SZ"))}]}')
-    curl -sS -X POST -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null 2>&1 || true
-}
-
-fail() {
-    local msg="$*"
-    echo "[bot] ERREUR : $msg" >&2
-    notify_discord "Commit Bot — ERROR" "$msg" 15158332
-    exit 1
-}
-
-# --- Pool de messages au format Conventional Commits ---
-COMMIT_MESSAGES=(
-    "chore: daily activity log"
-    "chore: routine maintenance"
-    "chore: update activity log"
-    "chore: housekeeping"
-    "chore: daily sync"
-    "chore: routine update"
-    "chore: log entry"
-    "docs: update notes"
-    "docs: log update"
-    "refactor: minor cleanup"
-)
-
-pick_message() {
-    local n=${#COMMIT_MESSAGES[@]}
-    echo "${COMMIT_MESSAGES[$((RANDOM % n))]}"
-}
-
-# --- Placement (dossier du projet commit-bot) ---
-case "$OSTYPE" in
-    darwin*) cd "$(dirname "$0")" || fail "cd impossible" ;;
-    linux*)  cd "$(dirname "$(readlink -f "$0")")" || fail "cd impossible" ;;
-    *)       fail "OS non supporté : $OSTYPE" ;;
-esac
-PROJECT_DIR="$(pwd)"
-
-# --- Dépendances ---
-command -v curl >/dev/null || fail "curl est requis"
-command -v jq   >/dev/null || fail "jq est requis (brew install jq)"
-command -v git  >/dev/null || fail "git est requis"
-
-# --- Configuration ---
-[ -f .env ] || fail ".env introuvable — copie .env.example en .env et remplis-le"
-# shellcheck disable=SC1091
-set -a; source .env; set +a
-
-# Sanitize : enlève sauts de ligne et espaces extérieurs (défense contre les copier-coller depuis GitHub Variables)
-sanitize() {
-    local v val
-    for v in "$@"; do
-        val=$(printenv "$v" 2>/dev/null || true)
-        if [ -n "$val" ]; then
-            export "$v=$(printf '%s' "$val" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-        fi
-    done
-    return 0
-}
-sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
-    GITHUB_PERSO_NAME GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN \
-    TARGET_CLONE_DIR TARGET_LOG_FILE TZ DISCORD_WEBHOOK_URL \
-    MAX_COMMITS_PER_DAY MIN_COMMITS_PER_DAY MAX_PRS_PER_DAY
-
-: "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant dans .env}"
-: "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant dans .env}"
-: "${GITHUB_PERSO_USER:?GITHUB_PERSO_USER manquant dans .env}"
-: "${GITHUB_PERSO_EMAIL:?GITHUB_PERSO_EMAIL manquant dans .env}"
-: "${GITHUB_PERSO_REPO:?GITHUB_PERSO_REPO manquant dans .env}"
-: "${GITHUB_PERSO_TOKEN:?GITHUB_PERSO_TOKEN manquant dans .env (requis pour push automatique)}"
-GITHUB_PERSO_NAME="${GITHUB_PERSO_NAME:-}"
-MAX_COMMITS_PER_DAY="${MAX_COMMITS_PER_DAY:-10}"
+require_commands curl jq git
+load_env
+require_vars GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
+    GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN
 MIN_COMMITS_PER_DAY="${MIN_COMMITS_PER_DAY:-1}"
-MAX_PRS_PER_DAY="${MAX_PRS_PER_DAY:-5}"  # doit être identique à celui de cosmetic.sh
-TARGET_CLONE_DIR="${TARGET_CLONE_DIR:-$HOME/.commit-bot-target}"
-TARGET_LOG_FILE="${TARGET_LOG_FILE:-notes.md}"
-export TZ="${TZ:-Africa/Lome}"
 
 log "Compte pro   : $GITHUB_PRO_USER"
 log "Repo cible   : $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO"
 log "Clone local  : $TARGET_CLONE_DIR"
 log "Fichier log  : $TARGET_LOG_FILE"
 
-# --- Bornes temporelles (journée locale) ---
-# Les cron GitHub démarrent souvent 2-3h en retard, donc après minuit. Avant
-# LATE_RUN_CUTOFF_HOUR, on traite la VEILLE et on antidate les commits à 23h30
-# de ce jour-là, au lieu de lire le compteur (≈ 0) d'une journée qui commence.
-LATE_RUN_CUTOFF_HOUR="${LATE_RUN_CUTOFF_HOUR:-6}"
-TZ_OFFSET=$(date +"%z")
-if [ "$(date +%H)" -lt "$LATE_RUN_CUTOFF_HOUR" ]; then
-    if date --version >/dev/null 2>&1; then
-        TODAY=$(date -d "1 day ago" +"%Y-%m-%d")
-    else
-        TODAY=$(date -v-1d +"%Y-%m-%d")
-    fi
+# --- Journée traitée ---
+# Run tardif (après minuit) : on traite la veille et on antidate les commits à
+# 23h30 de ce jour-là, au lieu de lire le compteur (≈ 0) d'une journée qui commence.
+TODAY=$(target_date "%Y-%m-%d")
+if is_late_run; then
     BACKDATE=true
     log "Run après minuit : traitement de la veille ($TODAY)"
 else
-    TODAY=$(date +"%Y-%m-%d")
     BACKDATE=false
 fi
 FROM="${TODAY}T00:00:00${TZ_OFFSET}"
 TO="${TODAY}T23:59:59${TZ_OFFSET}"
 log "Fenêtre      : $FROM → $TO"
 
-# --- Requête GraphQL ---
-payload=$(jq -nc \
-    --arg u "$GITHUB_PRO_USER" \
-    --arg f "$FROM" \
-    --arg t "$TO" \
-    '{
-      query: "query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){totalPullRequestContributions contributionCalendar{totalContributions}}}}",
-      variables: {u:$u, f:$f, t:$t}
-    }')
-
-response=$(curl -sS \
-    -H "Authorization: bearer $GITHUB_PRO_TOKEN" \
-    -H "Content-Type: application/json" \
-    -X POST \
-    -d "$payload" \
-    https://api.github.com/graphql)
-
-if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
-    fail "API GitHub : $(echo "$response" | jq -c '.errors')"
-fi
-echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
-    || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
-
+# --- Contributions pro ---
+response=$(query_contributions "$GITHUB_PRO_USER" "$GITHUB_PRO_TOKEN" "$FROM" "$TO" \
+    "totalPullRequestContributions contributionCalendar{totalContributions}")
 pro_total=$(echo "$response" | jq -r '.data.user.contributionsCollection.contributionCalendar.totalContributions // 0')
 pro_prs=$(echo "$response" | jq -r '.data.user.contributionsCollection.totalPullRequestContributions // 0')
 log "Contributions pro aujourd'hui : $pro_total (dont $pro_prs PR(s))"
@@ -213,64 +108,27 @@ if [ "$to_create" -le 0 ]; then
         '[{name:"Contributions pro", value:$pro, inline:true},
           {name:"Déjà miroirées", value:$done, inline:true},
           {name:"Repo cible", value:$repo, inline:false}]')
-    notify_discord "Commit Bot — No-op" "Aucun nouveau commit à créer aujourd'hui." 16776960 "$noop_fields"
+    notify_discord "Commit Bot — No-op" "Aucun nouveau commit à créer aujourd'hui." "$COLOR_NOOP" "$noop_fields"
     exit 0
 fi
 
 log "À créer : $to_create commit(s)"
 
-# --- Préparation du clone cible ---
-push_url="https://${GITHUB_PERSO_USER}:${GITHUB_PERSO_TOKEN}@github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
+# --- Commits ---
+prepare_target_clone
 
-if [ ! -d "$TARGET_CLONE_DIR/.git" ]; then
-    log "Premier run : clonage de $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO..."
-    git clone --quiet "$push_url" "$TARGET_CLONE_DIR" 2>&1 \
-        | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-        || fail "clonage de la cible a échoué"
-fi
-
-cd "$TARGET_CLONE_DIR" || fail "cd vers le clone cible impossible"
-
-# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
-git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
-
-# Détection branche par défaut
-DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
-[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
-log "Branche cible : $DEFAULT_BRANCH"
-
-# Aligne le clone sur le remote : jette tout commit local orphelin d'un push raté
-git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-    || fail "fetch du clone cible a échoué"
-git reset --quiet --hard
-git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
-
-# Identité pour les commits (locale au clone cible)
-git config user.email "$GITHUB_PERSO_EMAIL"
-[ -n "$GITHUB_PERSO_NAME" ] && git config user.name "$GITHUB_PERSO_NAME"
-
-# --- Génération des commits ---
 for i in $(seq 1 "$to_create"); do
-    msg=$(pick_message)
     if $BACKDATE; then
         # 23:30:00, 23:30:01, … sur la journée traitée
-        ts=$(printf '%sT23:%02d:%02d%s' "$TODAY" $((30 + i / 60)) $((i % 60)) "$TZ_OFFSET")
-        echo "$msg @ $ts" >> "$TARGET_LOG_FILE"
-        git add "$TARGET_LOG_FILE"
-        GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" \
-            git commit --quiet -m "$msg" || fail "git commit a échoué à l'itération $i"
+        log_commit "$(pick_message)" \
+            "$(printf '%sT23:%02d:%02d%s' "$TODAY" $((30 + i / 60)) $((i % 60)) "$TZ_OFFSET")"
     else
-        ts=$(date +"%a %b %e %H:%M:%S %Z %Y")
-        echo "$msg @ $ts" >> "$TARGET_LOG_FILE"
-        git add "$TARGET_LOG_FILE"
-        git commit --quiet -m "$msg" || fail "git commit a échoué à l'itération $i"
+        log_commit "$(pick_message)"
         sleep 1
     fi
 done
 
-# --- Push ---
-git push "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
-    || fail "git push a échoué"
+push_target
 
 # --- Mise à jour de l'état ---
 echo "$TODAY $total" > "$state_file"
@@ -281,4 +139,4 @@ success_fields=$(jq -nc --arg pro "$pro_total" --arg created "$to_create" --arg 
     '[{name:"Contributions pro", value:$pro, inline:true},
       {name:"Commits créés", value:$created, inline:true},
       {name:"Repo cible", value:($repo + " (" + $branch + ")"), inline:false}]')
-notify_discord "Commit Bot — Daily Sync" "Synchronisation quotidienne réussie." 3066993 "$success_fields"
+notify_discord "Commit Bot — Daily Sync" "Synchronisation quotidienne réussie." "$COLOR_SUCCESS" "$success_fields"
