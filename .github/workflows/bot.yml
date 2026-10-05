@@ -1,12 +1,22 @@
 name: bot
 
 # Daily mirror du compte pro vers le repo cible.
-# Schedule : 22:00 UTC = 22:00 Lomé (Africa/Lome est UTC+0).
+# Schedule : 22:00 UTC = 22:00 Lomé (Africa/Lome est UTC+0). En pratique le
+# run part souvent après minuit : bot.sh traite alors la veille (antidaté).
 
 on:
   schedule:
     - cron: '0 22 * * *'
   workflow_dispatch:  # déclenchement manuel depuis l'onglet Actions
+
+# bot / catchup / cosmetic poussent tous sur le repo cible : jamais en parallèle
+concurrency:
+  group: target-repo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write  # keepalive des workflows (voir dernière étape)
 
 jobs:
   run:
@@ -42,3 +52,15 @@ jobs:
           # arrivent via le bloc env: ci-dessus
           touch .env
           bash bot.sh
+
+      # Repo public sans push pendant 60 jours → GitHub désactive les cron
+      # ("disabled_inactivity"). Ré-activer via l'API remet le compteur à zéro.
+      - name: Keepalive des workflows planifiés
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in bot.yml catchup.yml cosmetic.yml weekly-summary.yml; do
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/enable" \
+              || echo "keepalive : échec pour ${wf}"
+          done

@@ -160,9 +160,25 @@ log "Clone local  : $TARGET_CLONE_DIR"
 log "Fichier log  : $TARGET_LOG_FILE"
 
 # --- Bornes temporelles (journée locale) ---
-TODAY=$(date +"%Y-%m-%d")
-FROM=$(date +"%Y-%m-%dT00:00:00%z")
-TO=$(date +"%Y-%m-%dT23:59:59%z")
+# Les cron GitHub démarrent souvent 2-3h en retard, donc après minuit. Avant
+# LATE_RUN_CUTOFF_HOUR, on traite la VEILLE et on antidate les commits à 23h30
+# de ce jour-là, au lieu de lire le compteur (≈ 0) d'une journée qui commence.
+LATE_RUN_CUTOFF_HOUR="${LATE_RUN_CUTOFF_HOUR:-6}"
+TZ_OFFSET=$(date +"%z")
+if [ "$(date +%H)" -lt "$LATE_RUN_CUTOFF_HOUR" ]; then
+    if date --version >/dev/null 2>&1; then
+        TODAY=$(date -d "1 day ago" +"%Y-%m-%d")
+    else
+        TODAY=$(date -v-1d +"%Y-%m-%d")
+    fi
+    BACKDATE=true
+    log "Run après minuit : traitement de la veille ($TODAY)"
+else
+    TODAY=$(date +"%Y-%m-%d")
+    BACKDATE=false
+fi
+FROM="${TODAY}T00:00:00${TZ_OFFSET}"
+TO="${TODAY}T23:59:59${TZ_OFFSET}"
 log "Fenêtre      : $FROM → $TO"
 
 # --- Requête GraphQL ---
@@ -185,6 +201,8 @@ response=$(curl -sS \
 if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
     fail "API GitHub : $(echo "$response" | jq -c '.errors')"
 fi
+echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
+    || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
 
 total=$(echo "$response" | jq -r '.data.user.contributionsCollection.contributionCalendar.totalContributions // 0')
 log "Contributions pro aujourd'hui : $total"
@@ -239,13 +257,19 @@ fi
 
 cd "$TARGET_CLONE_DIR" || fail "cd vers le clone cible impossible"
 
+# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
+git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
+
 # Détection branche par défaut
-DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}')
-[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
+[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
 log "Branche cible : $DEFAULT_BRANCH"
 
-git checkout --quiet "$DEFAULT_BRANCH"
-git pull --quiet origin "$DEFAULT_BRANCH" || fail "pull du clone cible a échoué"
+# Aligne le clone sur le remote : jette tout commit local orphelin d'un push raté
+git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
+    || fail "fetch du clone cible a échoué"
+git reset --quiet --hard
+git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
 
 # Identité pour les commits (locale au clone cible)
 git config user.email "$GITHUB_PERSO_EMAIL"
@@ -253,12 +277,21 @@ git config user.email "$GITHUB_PERSO_EMAIL"
 
 # --- Génération des commits ---
 for i in $(seq 1 "$to_create"); do
-    ts=$(date +"%a %b %e %H:%M:%S %Z %Y")
     msg=$(pick_message)
-    echo "$msg @ $ts" >> "$TARGET_LOG_FILE"
-    git add "$TARGET_LOG_FILE"
-    git commit --quiet -m "$msg" || fail "git commit a échoué à l'itération $i"
-    sleep 1
+    if $BACKDATE; then
+        # 23:30:00, 23:30:01, … sur la journée traitée
+        ts=$(printf '%sT23:%02d:%02d%s' "$TODAY" $((30 + i / 60)) $((i % 60)) "$TZ_OFFSET")
+        echo "$msg @ $ts" >> "$TARGET_LOG_FILE"
+        git add "$TARGET_LOG_FILE"
+        GIT_AUTHOR_DATE="$ts" GIT_COMMITTER_DATE="$ts" \
+            git commit --quiet -m "$msg" || fail "git commit a échoué à l'itération $i"
+    else
+        ts=$(date +"%a %b %e %H:%M:%S %Z %Y")
+        echo "$msg @ $ts" >> "$TARGET_LOG_FILE"
+        git add "$TARGET_LOG_FILE"
+        git commit --quiet -m "$msg" || fail "git commit a échoué à l'itération $i"
+        sleep 1
+    fi
 done
 
 # --- Push ---

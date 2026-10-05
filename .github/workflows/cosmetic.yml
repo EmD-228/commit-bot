@@ -2,12 +2,20 @@ name: cosmetic
 
 # Cosmetic bot : crée des PRs et issues falsifiées sur le repo cible,
 # en miroir des PRs/issues du pro, pour équilibrer le camembert Activity Overview.
-# Schedule : 23:30 UTC (= 23:30 Lomé), après bot.yml.
+# Schedule : 19:30 UTC (= 19:30 Lomé). Les cron GitHub de ce repo partent
+# 2-3h en retard (observé sept. 2026) : on vise un run réel avant minuit, pour
+# que les PRs créées tombent sur le bon jour. Si le run passe minuit malgré
+# tout, cosmetic.sh lit les PRs de la veille.
 
 on:
   schedule:
-    - cron: '30 23 * * *'
+    - cron: '30 19 * * *'
   workflow_dispatch:
+
+# bot / catchup / cosmetic poussent tous sur le repo cible : jamais en parallèle
+concurrency:
+  group: target-repo
+  cancel-in-progress: false
 
 jobs:
   run:

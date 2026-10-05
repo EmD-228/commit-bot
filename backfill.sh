@@ -133,6 +133,8 @@ response=$(curl -sS \
 if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
     fail "API GitHub : $(echo "$response" | jq -c '.errors')"
 fi
+echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
+    || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
 
 days=$(echo "$response" | jq -r '
     .data.user.contributionsCollection.contributionCalendar.weeks[].contributionDays[]
@@ -176,12 +178,18 @@ fi
 
 cd "$TARGET_CLONE_DIR" || fail "cd vers le clone cible impossible"
 
-DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}')
-[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
+git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
+
+DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
+[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
 log "Branche cible : $DEFAULT_BRANCH"
 
-git checkout --quiet "$DEFAULT_BRANCH"
-git pull --quiet origin "$DEFAULT_BRANCH" || fail "pull a échoué"
+# Aligne le clone sur le remote : jette tout commit local orphelin d'un push raté
+git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
+    || fail "fetch a échoué"
+git reset --quiet --hard
+git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
 
 git config user.email "$GITHUB_PERSO_EMAIL"
 [ -n "$GITHUB_PERSO_NAME" ] && git config user.name "$GITHUB_PERSO_NAME"

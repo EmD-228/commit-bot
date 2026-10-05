@@ -140,6 +140,8 @@ response=$(curl -sS \
 if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
     fail "API GitHub (pro) : $(echo "$response" | jq -c '.errors')"
 fi
+echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
+    || fail "API GitHub (pro) : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
 
 # Liste "date count" pour les jours de la période (incluant ceux à 0)
 pro_days=$(echo "$response" | jq -r --arg from "$FROM_DATE" --arg to "$TO_DATE" '
@@ -148,20 +150,7 @@ pro_days=$(echo "$response" | jq -r --arg from "$FROM_DATE" --arg to "$TO_DATE" 
     | "\(.date) \(.contributionCount)"
 ')
 
-# --- Helper : compter commits perso sur master pour un jour donné ---
-count_perso_commits_for_day() {
-    local day="$1"
-    local resp
-    resp=$(curl -sS -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
-        "https://api.github.com/repos/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}/commits?per_page=100&sha=master&since=${day}T00:00:00Z&until=${day}T23:59:59Z&author=${GITHUB_PERSO_EMAIL}")
-    if [ "$(echo "$resp" | jq 'type')" = "\"array\"" ]; then
-        echo "$resp" | jq 'length'
-    else
-        echo 0
-    fi
-}
-
-# --- Préparation clone cible (pour les commits qu'on va peut-être créer) ---
+# --- Préparation clone cible (sert au comptage ET aux commits à créer) ---
 push_url="https://${GITHUB_PERSO_USER}:${GITHUB_PERSO_TOKEN}@github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
 
 if [ ! -d "$TARGET_CLONE_DIR/.git" ]; then
@@ -171,7 +160,29 @@ if [ ! -d "$TARGET_CLONE_DIR/.git" ]; then
         || fail "clonage a échoué"
 fi
 
-# --- Détecte deltas avant de cloner/checkout (économise du I/O si rien à faire) ---
+cd "$TARGET_CLONE_DIR" || fail "cd vers le clone impossible"
+# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
+git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
+DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
+[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
+# Aligne le clone sur le remote : jette tout commit local orphelin d'un push raté
+git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
+    || fail "fetch a échoué"
+git reset --quiet --hard
+git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
+
+# --- Commits perso déjà présents, par jour (date d'auteur, heure locale) ---
+# Compté sur TOUT l'historique local. Surtout pas via `?since=` de l'API (ni
+# `git log --since`) : le parcours s'arrête au premier commit plus ancien, et
+# un backfill empile justement des commits anciens au sommet de l'historique
+# → tout compterait 0 et on recréerait des commits déjà présents.
+perso_counts=$(git log --author="<${GITHUB_PERSO_EMAIL}>" --format=%ad --date=format-local:%Y-%m-%d \
+    | sort | uniq -c)
+count_perso_commits_for_day() {
+    echo "$perso_counts" | awk -v d="$1" '$2 == d { n = $1 } END { print n + 0 }'
+}
+
+# --- Détecte deltas ---
 declare -a plan_day plan_delta
 total_to_create=0
 
@@ -196,19 +207,14 @@ done <<< "$pro_days"
 
 if [ "$total_to_create" -eq 0 ]; then
     log "Tout est à jour. Rien à rattraper."
-    notify_discord "Catchup Bot — No-op" "Les 7 derniers jours sont déjà à jour." 16776960 \
+    notify_discord "Catchup Bot — No-op" "Les ${LOOKBACK_DAYS} derniers jours sont déjà à jour." 16776960 \
         "$(jq -nc --arg p "$FROM_DATE → $TO_DATE" '[{name:"Période vérifiée", value:$p, inline:false}]')"
     exit 0
 fi
 
 log "Total à créer : $total_to_create commit(s) répartis sur ${#plan_day[@]} jour(s)"
 
-# --- Pull du clone cible ---
-cd "$TARGET_CLONE_DIR" || fail "cd vers le clone impossible"
-DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}')
-[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-git checkout --quiet "$DEFAULT_BRANCH"
-git pull --quiet origin "$DEFAULT_BRANCH" || fail "pull a échoué"
+# --- Identité ---
 git config user.email "$GITHUB_PERSO_EMAIL"
 [ -n "$GITHUB_PERSO_NAME" ] && git config user.name "$GITHUB_PERSO_NAME"
 

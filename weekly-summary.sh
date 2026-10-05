@@ -13,7 +13,12 @@
 set -euo pipefail
 
 log() { echo "[weekly] $*"; }
-fail() { echo "[weekly] ERREUR : $*" >&2; exit 1; }
+fail() {
+    local msg="$*"
+    echo "[weekly] ERREUR : $msg" >&2
+    notify_discord "Weekly Summary — ERROR" "$msg" 15158332
+    exit 1
+}
 
 # --- Notification Discord ---
 notify_discord() {
@@ -59,7 +64,6 @@ sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER \
 : "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant}"
 : "${GITHUB_PERSO_USER:?GITHUB_PERSO_USER manquant}"
 : "${GITHUB_PERSO_TOKEN:?GITHUB_PERSO_TOKEN manquant}"
-GITHUB_PERSO_REPO="${GITHUB_PERSO_REPO:-?}"
 export TZ="${TZ:-Africa/Lome}"
 
 # --- Helper cross-platform pour date math ---
@@ -87,8 +91,14 @@ query_calendar() {
     local payload
     payload=$(jq -nc --arg u "$user" --arg f "$FROM" --arg t "$TO" \
         '{query:"query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){contributionCalendar{totalContributions weeks{contributionDays{date contributionCount}}}}}}", variables:{u:$u,f:$f,t:$t}}')
-    curl -sS -H "Authorization: bearer $token" -H "Content-Type: application/json" -X POST -d "$payload" \
-        https://api.github.com/graphql
+    local resp
+    resp=$(curl -sS -H "Authorization: bearer $token" -H "Content-Type: application/json" -X POST -d "$payload" \
+        https://api.github.com/graphql)
+    # Échoue plutôt que d'envoyer un récap rempli de zéros
+    if echo "$resp" | jq -e '.errors' >/dev/null 2>&1 || ! echo "$resp" | jq -e '.data.user' >/dev/null 2>&1; then
+        fail "API GitHub ($user) : $(echo "$resp" | jq -c '.errors // .message // .' 2>/dev/null || echo "$resp")"
+    fi
+    echo "$resp"
 }
 
 # --- Pro ---

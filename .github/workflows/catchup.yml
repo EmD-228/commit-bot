@@ -9,6 +9,11 @@ on:
     - cron: '0 7 * * *'
   workflow_dispatch:
 
+# bot / catchup / cosmetic poussent tous sur le repo cible : jamais en parallèle
+concurrency:
+  group: target-repo
+  cancel-in-progress: false
+
 jobs:
   run:
     name: Daily catchup

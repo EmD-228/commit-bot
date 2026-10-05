@@ -12,8 +12,8 @@
 #
 # Le README du repo cible n'est JAMAIS touché.
 #
-# Cron suggéré (tous les jours à 23h30, après bot.sh) :
-#   30 23 * * * /bin/bash /<chemin-absolu>/commit-bot/cosmetic.sh >> bot.log 2>&1
+# Cron suggéré (tous les jours à 19h30) :
+#   30 19 * * * /bin/bash /<chemin-absolu>/commit-bot/cosmetic.sh >> bot.log 2>&1
 #
 
 set -euo pipefail
@@ -67,8 +67,10 @@ ISSUE_TITLES=(
     "Cleanup unused imports"
 )
 
+# Indirection compatible bash 3.2 (macOS) — `local -n` exige bash 4.3+
 pick_from() {
-    local -n arr=$1
+    local ref="$1[@]"
+    local arr=("${!ref}")
     local n=${#arr[@]}
     echo "${arr[$((RANDOM % n))]}"
 }
@@ -118,16 +120,29 @@ MAX_PRS_PER_DAY="${MAX_PRS_PER_DAY:-5}"
 ISSUE_WEEKDAY="${ISSUE_WEEKDAY:-1}"  # 1 = lundi (jour où on crée 1 issue)
 export TZ="${TZ:-Africa/Lome}"
 
-TODAY=$(date +"%Y-%m-%d")
-WEEKDAY=$(date +"%u")  # 1=lundi … 7=dimanche
+# Cron GitHub en retard → run après minuit : on lit les PRs de la VEILLE
+# (une PR ne peut pas être antidatée, elle apparaîtra sur le jour courant,
+# mais le compte n'est plus perdu)
+LATE_RUN_CUTOFF_HOUR="${LATE_RUN_CUTOFF_HOUR:-6}"
+target_date() {
+    if [ "$(date +%H)" -ge "$LATE_RUN_CUTOFF_HOUR" ]; then
+        date +"$1"
+    elif date --version >/dev/null 2>&1; then
+        date -d "1 day ago" +"$1"
+    else
+        date -v-1d +"$1"
+    fi
+}
+TODAY=$(target_date "%Y-%m-%d")
+WEEKDAY=$(target_date "%u")  # 1=lundi … 7=dimanche
 
 log "Compte pro : $GITHUB_PRO_USER"
 log "Repo cible : $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO"
 log "Jour       : $TODAY (weekday=$WEEKDAY)"
 
 # --- Requête API : combien de PRs/issues sur le pro aujourd'hui ? ---
-FROM=$(date +"%Y-%m-%dT00:00:00%z")
-TO=$(date +"%Y-%m-%dT23:59:59%z")
+FROM=$(target_date "%Y-%m-%dT00:00:00%z")
+TO=$(target_date "%Y-%m-%dT23:59:59%z")
 
 payload=$(jq -nc --arg u "$GITHUB_PRO_USER" --arg f "$FROM" --arg t "$TO" \
     '{query:"query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){totalPullRequestContributions totalIssueContributions}}}", variables:{u:$u,f:$f,t:$t}}')
@@ -140,6 +155,8 @@ response=$(curl -sS \
 if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
     fail "API GitHub : $(echo "$response" | jq -c '.errors')"
 fi
+echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
+    || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
 
 pro_prs=$(echo "$response" | jq -r '.data.user.contributionsCollection.totalPullRequestContributions // 0')
 pro_issues=$(echo "$response" | jq -r '.data.user.contributionsCollection.totalIssueContributions // 0')
@@ -169,7 +186,15 @@ if [ "$state_date" = "$TODAY" ]; then
     issues_to_create=$((issues_to_create - state_issues))
     [ "$prs_to_create" -lt 0 ] && prs_to_create=0
     [ "$issues_to_create" -lt 0 ] && issues_to_create=0
+else
+    state_prs=0; state_issues=0
 fi
+
+# Écrit l'état après CHAQUE PR/issue : un crash en cours de route
+# ne provoque pas de doublons au run suivant
+save_state() {
+    echo "$TODAY $state_prs $state_issues" > "$state_file"
+}
 
 log "À créer : $prs_to_create PR(s) + $issues_to_create issue(s)"
 
@@ -194,11 +219,20 @@ fi
 
 cd "$TARGET_CLONE_DIR" || fail "cd vers le clone impossible"
 
-DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | awk '/HEAD branch/ {print $NF}')
-[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+# Le token ne doit jamais rester dans .git/config (nettoie aussi les anciens clones)
+git remote set-url origin "https://github.com/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}.git"
 
-git checkout --quiet "$DEFAULT_BRANCH"
-git pull --quiet origin "$DEFAULT_BRANCH" || fail "pull a échoué"
+DEFAULT_BRANCH=$(git ls-remote --symref "$push_url" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')
+[ -n "$DEFAULT_BRANCH" ] || fail "branche par défaut du repo cible introuvable"
+
+# Aligne le clone sur le remote : jette tout commit local orphelin d'un run raté
+sync_default_branch() {
+    git fetch --quiet "$push_url" "$DEFAULT_BRANCH" 2>&1 | sed "s|${GITHUB_PERSO_TOKEN}|***|g" \
+        || fail "fetch a échoué"
+    git reset --quiet --hard
+    git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
+}
+sync_default_branch
 
 git config user.email "$GITHUB_PERSO_EMAIL"
 [ -n "$GITHUB_PERSO_NAME" ] && git config user.name "$GITHUB_PERSO_NAME"
@@ -230,19 +264,28 @@ create_pr_cycle() {
     number=$(echo "$resp" | jq -r '.number // empty')
     [ -z "$number" ] && fail "création de PR a échoué : $(echo "$resp" | jq -c '.errors // .message')"
 
-    curl -sS -X PUT \
-        -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
-        -H "Accept: application/vnd.github+json" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -nc --arg t "$title" '{merge_method:"squash", commit_title:$t}')" \
-        "$API_BASE/pulls/$number/merge" >/dev/null \
-        || fail "merge PR #$number a échoué"
+    # Juste après la création, GitHub n'a pas toujours fini de calculer la
+    # mergeabilité (405) : on réessaie quelques fois avant d'abandonner.
+    local attempt merge_resp merged=false
+    for attempt in 1 2 3 4 5; do
+        merge_resp=$(curl -sS -X PUT \
+            -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg t "$title" '{merge_method:"squash", commit_title:$t}')" \
+            "$API_BASE/pulls/$number/merge")
+        if [ "$(echo "$merge_resp" | jq -r '.merged // false' 2>/dev/null)" = "true" ]; then
+            merged=true
+            break
+        fi
+        if [ "$attempt" -lt 5 ]; then sleep $((attempt * 2)); fi
+    done
+    $merged || fail "merge PR #$number a échoué : $(echo "$merge_resp" | jq -c '.message // .' 2>/dev/null || echo "$merge_resp")"
 
     curl -sS -X DELETE \
         -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
         "$API_BASE/git/refs/heads/$branch" >/dev/null 2>&1 || true
-    git checkout --quiet "$DEFAULT_BRANCH"
-    git pull --quiet origin "$DEFAULT_BRANCH" || true
+    sync_default_branch
     git branch --quiet -D "$branch" 2>/dev/null || true
 
     log "  PR #$number : $title"
@@ -261,12 +304,14 @@ create_issue() {
     number=$(echo "$resp" | jq -r '.number // empty')
     [ -z "$number" ] && fail "création d'issue a échoué : $(echo "$resp" | jq -c '.errors // .message')"
 
-    curl -sS -X PATCH \
+    resp=$(curl -sS -X PATCH \
         -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
         -H "Accept: application/vnd.github+json" \
         -H "Content-Type: application/json" \
         -d '{"state":"closed"}' \
-        "$API_BASE/issues/$number" >/dev/null || true
+        "$API_BASE/issues/$number")
+    [ "$(echo "$resp" | jq -r '.state // empty' 2>/dev/null)" = "closed" ] \
+        || fail "fermeture de l'issue #$number a échoué : $(echo "$resp" | jq -c '.message // .' 2>/dev/null || echo "$resp")"
 
     log "  Issue #$number : $title"
 }
@@ -274,19 +319,15 @@ create_issue() {
 # --- Exécution ---
 for i in $(seq 1 "$prs_to_create"); do
     create_pr_cycle "$i"
+    state_prs=$((state_prs + 1)); save_state
     sleep 1
 done
 
 for i in $(seq 1 "$issues_to_create"); do
     create_issue "$(pick_from ISSUE_TITLES)"
+    state_issues=$((state_issues + 1)); save_state
     sleep 1
 done
-
-# --- État ---
-new_prs=$((state_prs + prs_to_create))
-new_issues=$((state_issues + issues_to_create))
-[ "$state_date" != "$TODAY" ] && { new_prs=$prs_to_create; new_issues=$issues_to_create; }
-echo "$TODAY $new_prs $new_issues" > "$state_file"
 
 # --- Notif Discord ---
 success_fields=$(jq -nc \
