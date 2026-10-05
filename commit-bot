@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+#
+# commit-bot — CLI interactif
+#
+# Copie en une fois les contributions d'un compte GitHub (pro) vers un autre
+# compte (perso), sur la plage de dates choisie. Pose les questions, montre le
+# récapitulatif, puis fait tout : aucun GitHub Actions, aucun cron, aucun
+# fichier de configuration à remplir.
+#
+# Usage : ./commit-bot
+#
+# Peut être relancé sans risque : les commits déjà présents sur le repo cible
+# sont comptés, seuls les manquants sont créés.
+#
+
+set -euo pipefail
+
+BOT_TAG="commit-bot"
+BOT_LABEL="commit-bot"
+# shellcheck source=lib/common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
+
+require_commands curl jq git
+
+# GitHub ne compte que les ~1000 derniers commits d'un même push : on pousse par lots
+PUSH_BATCH=900
+
+# --- Saisie ---
+# Args : question, [défaut]. Réponse dans REPLY.
+ask() {
+    local question="$1" default="${2:-}"
+    while true; do
+        if [ -n "$default" ]; then
+            printf '%s [%s] : ' "$question" "$default"
+        else
+            printf '%s : ' "$question"
+        fi
+        read -r REPLY || exit 1
+        if [ -z "$REPLY" ]; then REPLY="$default"; fi
+        if [ -n "$REPLY" ]; then return 0; fi
+        echo "  Réponse requise."
+    done
+}
+
+# Saisie masquée d'un token. Si `gh` est connecté à ce compte, Entrée réutilise son token.
+# Args : login. Réponse dans REPLY.
+ask_token() {
+    local login="$1" gh_token=""
+    if command -v gh >/dev/null; then
+        gh_token=$(gh auth token -u "$login" 2>/dev/null || true)
+    fi
+    while true; do
+        if [ -n "$gh_token" ]; then
+            printf 'Token GitHub de %s (Entrée = celui de gh) : ' "$login"
+        else
+            printf 'Token GitHub de %s (classic, scopes read:user + repo) : ' "$login"
+        fi
+        read -rs REPLY || exit 1
+        printf '\n'
+        if [ -z "$REPLY" ]; then REPLY="$gh_token"; fi
+        if [ -n "$REPLY" ]; then return 0; fi
+        echo "  Token requis."
+    done
+}
+
+# Args : question, [défaut]. Réponse (YYYY-MM-DD) dans REPLY.
+ask_date() {
+    while true; do
+        ask "$1" "${2:-}"
+        if [[ "$REPLY" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then return 0; fi
+        echo "  Format attendu : AAAA-MM-JJ"
+    done
+}
+
+# Fuseau horaire du système (lien /etc/localtime sur macOS et Linux)
+detect_tz() {
+    local zone
+    zone=$(readlink /etc/localtime 2>/dev/null | sed 's|.*zoneinfo/||')
+    echo "${zone:-UTC}"
+}
+
+# Utilisateur authentifié par un token (vide si token invalide)
+token_login() {
+    curl -sS -H "Authorization: bearer $1" https://api.github.com/user | jq -r '.login // empty'
+}
+
+lower() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+echo
+echo "commit-bot — copie des contributions d'un compte GitHub vers un autre"
+echo "Seuls les compteurs par jour sont lus : aucun code, message ni nom de repo."
+echo "Ctrl+C pour quitter à tout moment. Rien n'est poussé avant ta confirmation."
+echo
+
+# --- 1. Compte source (pro) ---
+echo "1. Compte source (celui dont on copie les contributions)"
+while true; do
+    ask "Nom d'utilisateur"
+    GITHUB_PRO_USER="$REPLY"
+    ask_token "$GITHUB_PRO_USER"
+    GITHUB_PRO_TOKEN="$REPLY"
+    # Valide le couple utilisateur / token et récupère les années d'activité
+    if years_resp=$(query_contributions "$GITHUB_PRO_USER" "$GITHUB_PRO_TOKEN" \
+        "$(date -u +%Y-%m-%d)T00:00:00Z" "$(date -u +%Y-%m-%d)T23:59:59Z" "contributionYears" 2>&1); then
+        break
+    fi
+    echo "  ${years_resp#\[$BOT_TAG\] ERREUR : }"
+    echo "  Vérifie le nom d'utilisateur et le token, puis recommence."
+done
+first_year=$(echo "$years_resp" | jq -r '.data.user.contributionsCollection.contributionYears | min // empty')
+echo "  OK — activité depuis ${first_year:-?}"
+echo
+
+# --- 2. Compte cible (perso) ---
+echo "2. Compte cible (celui qui reçoit les commits)"
+while true; do
+    ask "Nom d'utilisateur"
+    GITHUB_PERSO_USER="$REPLY"
+    ask_token "$GITHUB_PERSO_USER"
+    GITHUB_PERSO_TOKEN="$REPLY"
+    login=$(token_login "$GITHUB_PERSO_TOKEN")
+    if [ "$(lower "$login")" = "$(lower "$GITHUB_PERSO_USER")" ]; then break; fi
+    if [ -n "$login" ]; then
+        echo "  Ce token appartient à $login, pas à $GITHUB_PERSO_USER. Recommence."
+    else
+        echo "  Token invalide. Recommence."
+    fi
+done
+echo "  Les commits ne comptent que si l'email est VÉRIFIÉ sur ce compte (github.com/settings/emails)."
+ask "Email du compte"
+GITHUB_PERSO_EMAIL="$REPLY"
+ask "Nom affiché dans les commits" "$GITHUB_PERSO_USER"
+GITHUB_PERSO_NAME="$REPLY"
+
+while true; do
+    ask "Repo qui reçoit les commits (doit exister et contenir au moins un commit)"
+    GITHUB_PERSO_REPO="$REPLY"
+    repo_json=$(curl -sS -H "Authorization: bearer $GITHUB_PERSO_TOKEN" \
+        "https://api.github.com/repos/${GITHUB_PERSO_USER}/${GITHUB_PERSO_REPO}")
+    if [ -z "$(echo "$repo_json" | jq -r '.full_name // empty')" ]; then
+        echo "  Repo $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO introuvable. Crée-le sur GitHub (avec un README), puis recommence."
+    elif [ "$(echo "$repo_json" | jq -r '.fork')" = "true" ]; then
+        echo "  Ce repo est un fork : GitHub ne compte pas les commits des forks. Choisis un autre repo."
+    elif [ "$(echo "$repo_json" | jq -r '.permissions.push // false')" != "true" ]; then
+        echo "  Ce token ne peut pas pousser sur ce repo. Choisis un autre repo ou un autre token."
+    else
+        break
+    fi
+done
+if [ "$(echo "$repo_json" | jq -r '.private')" = "true" ]; then
+    echo "  Repo privé : active « Private contributions » sur ton profil pour que les carrés s'affichent."
+fi
+echo
+
+# --- 3. Période et réglages ---
+echo "3. Période et réglages"
+ask_date "Date de début" "${first_year:-$(date +%Y)}-01-01"
+START="$REPLY"
+while true; do
+    ask_date "Date de fin" "$(date +%Y-%m-%d)"
+    END="$REPLY"
+    if [[ ! "$END" < "$START" ]]; then break; fi
+    echo "  La date de fin doit être après la date de début."
+done
+while true; do
+    ask "Maximum de commits par jour (0 = pas de limite)" "10"
+    if [[ "$REPLY" =~ ^[0-9]+$ ]]; then break; fi
+    echo "  Nombre entier attendu."
+done
+MAX_PER_DAY="$REPLY"
+while true; do
+    ask "Fuseau horaire (celui de ton profil GitHub)" "$(detect_tz)"
+    if [ -f "/usr/share/zoneinfo/$REPLY" ] || [ "$REPLY" = "UTC" ]; then break; fi
+    echo "  Fuseau inconnu (exemples : Africa/Lome, Europe/Paris, America/New_York)."
+done
+export TZ="$REPLY"
+TZ_OFFSET=$(date +"%z")
+echo
+
+# --- Contributions source, année par année (l'API limite une requête à un an) ---
+echo "Lecture des contributions de $GITHUB_PRO_USER..."
+days=""
+year="${START:0:4}"
+while [ "$year" -le "${END:0:4}" ]; do
+    from="$year-01-01"; if [[ "$from" < "$START" ]]; then from="$START"; fi
+    to="$year-12-31";   if [[ "$END" < "$to" ]];   then to="$END"; fi
+    resp=$(query_contributions "$GITHUB_PRO_USER" "$GITHUB_PRO_TOKEN" \
+        "${from}T00:00:00${TZ_OFFSET}" "${to}T23:59:59${TZ_OFFSET}" \
+        "contributionCalendar{weeks{contributionDays{date contributionCount}}}")
+    days="${days}$(echo "$resp" | jq -r --arg f "$from" --arg t "$to" '
+        .data.user.contributionsCollection.contributionCalendar.weeks[].contributionDays[]
+        | select(.contributionCount > 0 and .date >= $f and .date <= $t)
+        | "\(.date) \(.contributionCount)"')"$'\n'
+    year=$((year + 1))
+done
+days=$(echo "$days" | grep -v '^$' | sort || true)
+
+if [ -z "$days" ]; then
+    echo "Aucune contribution entre $START et $END. Rien à faire."
+    exit 0
+fi
+
+# --- Repo cible : clone temporaire, et commits déjà présents (pour reprendre sans doublon) ---
+TARGET_CLONE_DIR="$(mktemp -d)/repo"
+trap 'rm -rf "$(dirname "$TARGET_CLONE_DIR")"' EXIT
+TARGET_LOG_FILE="notes.md"
+prepare_target_clone >/dev/null
+
+existing=$(git log --author="<${GITHUB_PERSO_EMAIL}>" --format='%ad %s' --date=format-local:%Y-%m-%d \
+    | SUBJECTS="$(printf '%s\n' "${COMMIT_MESSAGES[@]}")" awk '
+        BEGIN { n = split(ENVIRON["SUBJECTS"], a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+        { if (substr($0, 12) in ok) c[$1]++ }
+        END { for (d in c) print d, c[d] }')
+
+# Plan : "jour nombre" (ordre chronologique), plafonné, moins l'existant
+plan=$(echo "$days" | EXISTING="$existing" awk -v cap="$MAX_PER_DAY" '
+    BEGIN { n = split(ENVIRON["EXISTING"], lines, "\n"); for (i = 1; i <= n; i++) { split(lines[i], f, " "); have[f[1]] = f[2] } }
+    {
+        want = $2
+        if (cap > 0 && want > cap) want = cap
+        todo = want - have[$1]
+        if (todo > 0) print $1, todo
+    }')
+
+active_days=$(echo "$days" | wc -l | tr -d ' ')
+total_contribs=$(echo "$days" | awk '{ s += $2 } END { print s }')
+to_create=$(echo "$plan" | awk '{ s += $2 } END { print s + 0 }')
+plan_days=$(echo "$plan" | grep -c . || true)
+
+echo
+echo "Récapitulatif"
+echo "  Source       : $GITHUB_PRO_USER"
+echo "  Cible        : $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO (branche $DEFAULT_BRANCH)"
+echo "  Période      : $START → $END ($TZ)"
+echo "  Jours actifs : $active_days, $total_contribs contribution(s)"
+if [ "$MAX_PER_DAY" -gt 0 ]; then
+    echo "  Plafond      : $MAX_PER_DAY commit(s) par jour"
+fi
+echo "  À créer      : $to_create commit(s) sur $plan_days jour(s), en $(( (to_create + PUSH_BATCH - 1) / PUSH_BATCH )) push(s)"
+echo
+
+if [ "$to_create" -eq 0 ]; then
+    echo "Tout est déjà sur le repo cible. Rien à faire."
+    exit 0
+fi
+
+ask "Lancer la copie ? (oui/non)" "non"
+case "$(lower "$REPLY")" in
+    o|oui|y|yes) ;;
+    *) echo "Annulé, rien n'a été poussé."; exit 0 ;;
+esac
+
+# --- Création des commits, du plus ancien au plus récent, poussés par lots ---
+created=0
+batch=0
+while read -r day count; do
+    [ -z "$day" ] && continue
+    commit_spread_over_day "$day" "$count"
+    created=$((created + count))
+    batch=$((batch + count))
+    if [ "$batch" -ge "$PUSH_BATCH" ]; then
+        push_target
+        batch=0
+        echo "  $created / $to_create commit(s) poussé(s)"
+    fi
+done <<< "$plan"
+if [ "$batch" -gt 0 ]; then
+    push_target
+    echo "  $created / $to_create commit(s) poussé(s)"
+fi
+
+echo
+echo "Terminé : $created commit(s) copié(s) sur https://github.com/$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO"
+echo "Le graphe de contributions peut mettre quelques minutes à se mettre à jour."

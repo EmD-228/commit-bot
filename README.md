@@ -86,6 +86,24 @@ Recommended setup: `bot.sh` on cron (forward-looking, automated) plus a one-time
 
 ---
 
+## One-shot copy (interactive CLI)
+
+Leaving a job and just want to bring your work history over once? No cron, no GitHub Actions, no config file:
+
+```bash
+git clone https://github.com/EmD-228/commit-bot.git
+cd commit-bot
+./commit-bot
+```
+
+It asks for both accounts (usernames + tokens — press Enter to reuse a `gh` login), the target repo, the date range, a per-day cap and your timezone, shows a summary, and only pushes after you confirm. It reads the source account year by year, creates the commits oldest first and pushes them in batches (GitHub stops counting older commits beyond ~1000 per push). Safe to re-run: commits already on the target repo are not duplicated.
+
+Do it **before** leaving: once the work account is closed or removed from the organisation, its private contribution counts may no longer be readable.
+
+Requires `git`, `curl` and `jq`.
+
+---
+
 ## Quick start
 
 ### 1. Clone
