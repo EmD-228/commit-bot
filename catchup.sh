@@ -55,6 +55,22 @@ pick_message() {
     echo "${COMMIT_MESSAGES[$((RANDOM % n))]}"
 }
 
+# --- Titres des PRs de cosmetic.sh (DOIT rester identique à PR_TITLES de cosmetic.sh) ---
+# Sert à reconnaître ses commits squash : chaque PR cosmetic = 2 contributions
+# (PR + squash) déjà présentes sur le profil, à ne pas recréer en commits.
+COSMETIC_PR_TITLES=(
+    "refactor: simplify activity logging"
+    "chore: tidy notes formatting"
+    "docs: clarify usage example"
+    "fix: typo in log entry"
+    "chore: remove stale entries"
+    "refactor: reorganize sections"
+    "docs: update changelog"
+    "chore: bump activity log"
+    "fix: minor formatting"
+    "refactor: collapse redundant lines"
+)
+
 # --- Date helper cross-platform ---
 date_days_ago() {
     local n="$1"
@@ -176,32 +192,48 @@ git checkout --quiet -B "$DEFAULT_BRANCH" FETCH_HEAD
 # `git log --since`) : le parcours s'arrête au premier commit plus ancien, et
 # un backfill empile justement des commits anciens au sommet de l'historique
 # → tout compterait 0 et on recréerait des commits déjà présents.
-perso_counts=$(git log --author="<${GITHUB_PERSO_EMAIL}>" --format=%ad --date=format-local:%Y-%m-%d \
-    | sort | uniq -c)
-count_perso_commits_for_day() {
-    echo "$perso_counts" | awk -v d="$1" '$2 == d { n = $1 } END { print n + 0 }'
+#
+# Stdin : "YYYY-MM-DD sujet" ; $1 : sujets acceptés (un par ligne)
+# Stdout : "YYYY-MM-DD n" pour les commits dont le sujet est dans la liste
+count_by_day() {
+    SUBJECTS="$1" awk '
+        BEGIN { n = split(ENVIRON["SUBJECTS"], a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+        { s = substr($0, 12); if (s in ok) c[$1]++ }
+        END { for (d in c) print d, c[d] }'
+}
+# Commits du bot (bot.sh / catchup.sh / backfill.sh)
+bot_counts=$(git log --author="<${GITHUB_PERSO_EMAIL}>" --format='%ad %s' --date=format-local:%Y-%m-%d \
+    | count_by_day "$(printf '%s\n' "${COMMIT_MESSAGES[@]}")")
+# Commits squash des PRs de cosmetic.sh (auteur fixé par GitHub au merge : pas de filtre --author)
+cosmetic_counts=$(git log --format='%ad %s' --date=format-local:%Y-%m-%d \
+    | count_by_day "$(printf '%s\n' "${COSMETIC_PR_TITLES[@]}")")
+lookup() {
+    echo "$1" | awk -v d="$2" '$1 == d { n = $2 } END { print n + 0 }'
 }
 
 # --- Détecte deltas ---
+# Même règle que bot.sh : commits = pro − 2 × PRs cosmetic du jour, plafonné.
+# Ici on prend les PRs cosmetic RÉELLEMENT créées : si cosmetic.sh a raté un
+# jour, ses contributions sont complétées en commits.
 declare -a plan_day plan_delta
 total_to_create=0
 
 while read -r day pro_count; do
     [ -z "$day" ] && continue
     pro_count=${pro_count:-0}
-    # Apply cap on target
-    target=$pro_count
+    prs=$(lookup "$cosmetic_counts" "$day")
+    target=$((pro_count - 2 * prs))
+    [ "$target" -lt 0 ] && target=0
     [ "$target" -gt "$MAX_COMMITS_PER_DAY" ] && target=$MAX_COMMITS_PER_DAY
-    # Count what's already on perso
-    perso_count=$(count_perso_commits_for_day "$day")
+    perso_count=$(lookup "$bot_counts" "$day")
     delta=$((target - perso_count))
     if [ "$delta" -gt 0 ]; then
-        log "  $day : pro=$pro_count (cap→$target) perso=$perso_count → manque $delta"
+        log "  $day : pro=$pro_count PRs cosmetic=$prs → cible $target commit(s), perso=$perso_count → manque $delta"
         plan_day+=("$day")
         plan_delta+=("$delta")
         total_to_create=$((total_to_create + delta))
     else
-        log "  $day : pro=$pro_count (cap→$target) perso=$perso_count → OK"
+        log "  $day : pro=$pro_count PRs cosmetic=$prs → cible $target commit(s), perso=$perso_count → OK"
     fi
 done <<< "$pro_days"
 

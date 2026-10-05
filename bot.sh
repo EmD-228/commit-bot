@@ -68,45 +68,6 @@ pick_message() {
     echo "${COMMIT_MESSAGES[$((RANDOM % n))]}"
 }
 
-# --- Pool de titres d'issues (style task tracker) ---
-ISSUE_TITLES=(
-    "Improve documentation clarity"
-    "Add changelog entry"
-    "Polish README formatting"
-    "Refactor for clarity"
-    "Add inline comments"
-    "Tidy up dead code"
-    "Better error messages"
-    "Add usage example"
-    "Update notes"
-    "Cleanup unused imports"
-)
-
-pick_issue_title() {
-    local n=${#ISSUE_TITLES[@]}
-    echo "${ISSUE_TITLES[$((RANDOM % n))]}"
-}
-
-# --- Distribution des contributions par type ---
-# Args: total_contribs
-# Stdout: "commits prs issues" (où prs * 2 = contribs apportées par les PRs : 1 PR open + 1 squash commit)
-distribute_contributions() {
-    local n=$1
-    if [ "$n" -le 3 ]; then
-        echo "$n 0 0"
-    elif [ "$n" -le 6 ]; then
-        # 1 PR (= 2 contribs) + reste en commits
-        echo "$((n - 2)) 1 0"
-    else
-        # ~10% issues, ~20% PRs (=40% des contribs), reste en commits
-        local issues=$((n / 10))
-        [ "$issues" -lt 1 ] && issues=1
-        local prs=$((n / 5))
-        local commits=$((n - 2 * prs - issues))
-        echo "$commits $prs $issues"
-    fi
-}
-
 # --- Placement (dossier du projet commit-bot) ---
 case "$OSTYPE" in
     darwin*) cd "$(dirname "$0")" || fail "cd impossible" ;;
@@ -139,7 +100,7 @@ sanitize() {
 sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
     GITHUB_PERSO_NAME GITHUB_PERSO_REPO GITHUB_PERSO_TOKEN \
     TARGET_CLONE_DIR TARGET_LOG_FILE TZ DISCORD_WEBHOOK_URL \
-    MAX_COMMITS_PER_DAY MIN_COMMITS_PER_DAY
+    MAX_COMMITS_PER_DAY MIN_COMMITS_PER_DAY MAX_PRS_PER_DAY
 
 : "${GITHUB_PRO_USER:?GITHUB_PRO_USER manquant dans .env}"
 : "${GITHUB_PRO_TOKEN:?GITHUB_PRO_TOKEN manquant dans .env}"
@@ -150,6 +111,7 @@ sanitize GITHUB_PRO_USER GITHUB_PRO_TOKEN GITHUB_PERSO_USER GITHUB_PERSO_EMAIL \
 GITHUB_PERSO_NAME="${GITHUB_PERSO_NAME:-}"
 MAX_COMMITS_PER_DAY="${MAX_COMMITS_PER_DAY:-10}"
 MIN_COMMITS_PER_DAY="${MIN_COMMITS_PER_DAY:-1}"
+MAX_PRS_PER_DAY="${MAX_PRS_PER_DAY:-5}"  # doit être identique à celui de cosmetic.sh
 TARGET_CLONE_DIR="${TARGET_CLONE_DIR:-$HOME/.commit-bot-target}"
 TARGET_LOG_FILE="${TARGET_LOG_FILE:-notes.md}"
 export TZ="${TZ:-Africa/Lome}"
@@ -187,7 +149,7 @@ payload=$(jq -nc \
     --arg f "$FROM" \
     --arg t "$TO" \
     '{
-      query: "query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){contributionCalendar{totalContributions}}}}",
+      query: "query($u:String!,$f:DateTime!,$t:DateTime!){user(login:$u){contributionsCollection(from:$f,to:$t){totalPullRequestContributions contributionCalendar{totalContributions}}}}",
       variables: {u:$u, f:$f, t:$t}
     }')
 
@@ -204,15 +166,27 @@ fi
 echo "$response" | jq -e '.data.user' >/dev/null 2>&1 \
     || fail "API GitHub : utilisateur '$GITHUB_PRO_USER' introuvable ou réponse invalide : $(echo "$response" | jq -c '.message // .' 2>/dev/null || echo "$response")"
 
-total=$(echo "$response" | jq -r '.data.user.contributionsCollection.contributionCalendar.totalContributions // 0')
-log "Contributions pro aujourd'hui : $total"
+pro_total=$(echo "$response" | jq -r '.data.user.contributionsCollection.contributionCalendar.totalContributions // 0')
+pro_prs=$(echo "$response" | jq -r '.data.user.contributionsCollection.totalPullRequestContributions // 0')
+log "Contributions pro aujourd'hui : $pro_total (dont $pro_prs PR(s))"
+
+# Les PRs sont reproduites par cosmetic.sh : 1 PR + 1 commit squash = 2
+# contributions chacune (plafonné à MAX_PRS_PER_DAY). On les retire du total
+# pour que le profil perso affiche le même total que le pro.
+cosmetic_prs=$pro_prs
+[ "$cosmetic_prs" -gt "$MAX_PRS_PER_DAY" ] && cosmetic_prs=$MAX_PRS_PER_DAY
+reserved=$((2 * cosmetic_prs))
+total=$((pro_total - reserved))
+[ "$total" -lt 0 ] && total=0
+[ "$reserved" -gt 0 ] && log "Réservé à cosmetic.sh : $reserved contribution(s) ($cosmetic_prs PR(s)) → $total commit(s)"
 
 if [ "$total" -gt "$MAX_COMMITS_PER_DAY" ]; then
     log "Cap appliqué : $total → $MAX_COMMITS_PER_DAY"
     total=$MAX_COMMITS_PER_DAY
 fi
 
-if [ "$total" -lt "$MIN_COMMITS_PER_DAY" ]; then
+# Baseline uniquement si cosmetic.sh ne crée rien : sinon le jour a déjà ses contributions
+if [ "$reserved" -eq 0 ] && [ "$total" -lt "$MIN_COMMITS_PER_DAY" ]; then
     log "Baseline appliqué : $total → $MIN_COMMITS_PER_DAY (au moins 1 commit par jour)"
     total=$MIN_COMMITS_PER_DAY
 fi
@@ -235,7 +209,7 @@ to_create=$((total - already))
 
 if [ "$to_create" -le 0 ]; then
     log "Rien à faire (déjà créés aujourd'hui : $already / total : $total)"
-    noop_fields=$(jq -nc --arg pro "$total" --arg done "$already" --arg repo "$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO" \
+    noop_fields=$(jq -nc --arg pro "$pro_total" --arg done "$already" --arg repo "$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO" \
         '[{name:"Contributions pro", value:$pro, inline:true},
           {name:"Déjà miroirées", value:$done, inline:true},
           {name:"Repo cible", value:$repo, inline:false}]')
@@ -303,7 +277,7 @@ echo "$TODAY $total" > "$state_file"
 
 log "Terminé : $to_create commit(s) poussé(s) sur $GITHUB_PERSO_USER/$GITHUB_PERSO_REPO@$DEFAULT_BRANCH"
 
-success_fields=$(jq -nc --arg pro "$total" --arg created "$to_create" --arg repo "$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO" --arg branch "$DEFAULT_BRANCH" \
+success_fields=$(jq -nc --arg pro "$pro_total" --arg created "$to_create" --arg repo "$GITHUB_PERSO_USER/$GITHUB_PERSO_REPO" --arg branch "$DEFAULT_BRANCH" \
     '[{name:"Contributions pro", value:$pro, inline:true},
       {name:"Commits créés", value:$created, inline:true},
       {name:"Repo cible", value:($repo + " (" + $branch + ")"), inline:false}]')

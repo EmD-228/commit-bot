@@ -40,6 +40,8 @@ fail() {
 }
 
 # --- Pool de titres de PRs (style change request) ---
+# DOIT rester identique à COSMETIC_PR_TITLES de catchup.sh, qui s'en sert pour
+# reconnaître les commits squash de ces PRs.
 PR_TITLES=(
     "refactor: simplify activity logging"
     "chore: tidy notes formatting"
